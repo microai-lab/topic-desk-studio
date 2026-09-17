@@ -141,3 +141,23 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# macOS metadata must never enter the repository.
+**/.DS_Store
+
+# Tauri and Rust build outputs.
+src-tauri/target/
+target/
+
+# Desktop bundles and generated release artifacts.
+release/
+*.dmg
+*.AppImage
+*.msi
+*.exe
+
+# Local Topic Desk runtime data.
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

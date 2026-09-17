@@ -1,0 +1,13 @@
+<!-- Topic Desk Studio master icon; generated platform assets live under src-tauri/icons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#e9e4d8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="#252720"/>
+  <rect x="156" y="156" width="712" height="712" rx="142" fill="url(#paper)"/>
+  <path d="M256 322h512M256 512h512M256 702h330" stroke="#d9572c" stroke-width="72" stroke-linecap="round"/>
+  <circle cx="738" cy="702" r="66" fill="#27775c"/>
+</svg>

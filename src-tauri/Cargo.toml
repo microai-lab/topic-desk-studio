@@ -1,0 +1,37 @@
+[package]
+name = "topic-desk-studio"
+version = "0.1.0"
+description = "Independent local-first trend curation desktop application"
+authors = ["MicroAI Lab"]
+edition = "2021"
+
+[lib]
+name = "topic_desk_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+encoding_rs = "0.8"
+feed-rs = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "brotli", "gzip", "json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+unicode-normalization = "0.1"
+url = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

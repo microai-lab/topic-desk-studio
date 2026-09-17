@@ -1,0 +1,18 @@
+# pnpm stores security-sensitive dependency build allowlists at workspace scope.
+packages:
+  - .
+
+confirmModulesPurge: false
+
+allowBuilds:
+  # Vite requires esbuild's platform-specific binary installation step.
+  esbuild: true
+
+# Local installs fetch only the current host binaries; release CI installs on each target OS.
+supportedArchitectures:
+  os:
+    - current
+  cpu:
+    - current
+  libc:
+    - current
