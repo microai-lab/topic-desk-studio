@@ -19,7 +19,7 @@
   <a href="./LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-green" /></a>
 </p>
 
-Topic Desk Studio 是 `dsh-topic-desk` 的独立桌面版。它将公开热点采集到本机 SQLite，无需 DeepSeek Harness、Node.js sidecar、用户账户或远程数据库。
+Topic Desk Studio 是 [`dsh-topic-desk`](https://github.com/microai-lab/dsh-topic-desk) 的独立桌面版。它将公开热点采集到本机 SQLite，无需 DeepSeek Harness、Node.js sidecar、用户账户或远程数据库。
 
 ## 核心亮点
 

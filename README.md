@@ -19,7 +19,7 @@
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green" /></a>
 </p>
 
-Topic Desk Studio is a standalone desktop edition of `dsh-topic-desk`. It collects public trending topics into a local SQLite database without requiring DeepSeek Harness, a Node.js sidecar, an account, or a remote database.
+Topic Desk Studio is a standalone desktop edition of [`dsh-topic-desk`](https://github.com/microai-lab/dsh-topic-desk). It collects public trending topics into a local SQLite database without requiring DeepSeek Harness, a Node.js sidecar, an account, or a remote database.
 
 ## Highlights
 
