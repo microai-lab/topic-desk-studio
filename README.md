@@ -130,6 +130,8 @@ Push a tag matching `v*` or run the `build-desktop` workflow manually. GitHub Ac
 - Windows
 - Linux
 
+For a `v*` tag, the workflow waits for every native build, creates or updates the matching GitHub Release, generates release notes, and attaches the native installers. A manual workflow run keeps its packages as Actions artifacts without creating a Release.
+
 Signing credentials are intentionally not included in the repository and must be configured separately for public distribution.
 
 ## License

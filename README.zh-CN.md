@@ -130,6 +130,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 - Windows
 - Linux
 
+对于 `v*` Tag，工作流会等待全部原生构建成功，创建或更新对应的 GitHub Release，自动生成版本说明并附加各平台安装包。手动运行工作流时只保留 Actions Artifacts，不会创建 Release。
+
 仓库不会包含签名凭据；正式公开分发时需要单独配置各平台的签名材料。
 
 ## 许可证
