@@ -20,6 +20,7 @@ pub struct AppState {
     pub database: Mutex<Connection>,
     pub database_path: PathBuf,
     pub refreshing: Arc<AtomicBool>,
+    pub api_key_cache: Arc<Mutex<translator::CredentialCache>>,
 }
 
 /// Convert poisoned locks and repository errors into safe command errors.
@@ -66,7 +67,8 @@ pub fn set_platform_enabled(
 #[tauri::command]
 pub fn get_model_settings(state: State<'_, AppState>) -> Result<ModelSettings, String> {
     let mut settings = with_repository(&state, |repository| repository.model_settings())?;
-    settings.has_api_key = translator::has_api_key().map_err(|error| error.to_string())?;
+    settings.has_api_key =
+        translator::has_api_key(&state.api_key_cache).map_err(|error| error.to_string())?;
     Ok(settings)
 }
 
@@ -87,7 +89,8 @@ pub fn save_model_settings(
     })?;
     if let Some(api_key) = settings.api_key.as_deref() {
         if !api_key.trim().is_empty() {
-            translator::save_api_key(api_key).map_err(|error| error.to_string())?;
+            translator::save_api_key(&state.api_key_cache, api_key)
+                .map_err(|error| error.to_string())?;
         }
     }
     get_model_settings(state)
@@ -108,8 +111,9 @@ pub async fn translate_topic(
             .ok_or_else(|| AppError::InvalidInput("话题不存在或已失效".into()))?;
         Ok((title, repository.model_settings()?))
     })?;
+    let api_key_cache = Arc::clone(&state.api_key_cache);
     tauri::async_runtime::spawn_blocking(move || {
-        translator::translate_title(topic_id, &title, &settings)
+        translator::translate_title(topic_id, &title, &settings, &api_key_cache)
     })
     .await
     .map_err(|error| format!("翻译任务异常结束：{error}"))?

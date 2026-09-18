@@ -37,6 +37,9 @@ pub fn run() {
                 database: std::sync::Mutex::new(database),
                 database_path: database_path.clone(),
                 refreshing: Arc::clone(&refreshing),
+                api_key_cache: Arc::new(std::sync::Mutex::new(
+                    translator::CredentialCache::default(),
+                )),
             });
 
             // A detached scheduler keeps desktop refreshes independent from WebView visibility.

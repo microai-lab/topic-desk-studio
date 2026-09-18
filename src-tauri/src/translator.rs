@@ -1,5 +1,6 @@
 //! Optional English-title translation through a user-configured OpenAI-compatible endpoint.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use keyring::Entry;
@@ -13,6 +14,13 @@ use crate::models::{ModelSettings, TranslationResult};
 const CREDENTIAL_SERVICE: &str = "com.dataelement.topicdesk.studio";
 const CREDENTIAL_USER: &str = "model-api-key";
 
+/// Process-local secret cache; the operating-system vault remains the persistent source of truth.
+#[derive(Default)]
+pub struct CredentialCache {
+    loaded: bool,
+    api_key: Option<String>,
+}
+
 /// Determine whether a title is English-like enough to offer the translation action.
 pub fn is_english_title(title: &str) -> bool {
     title.chars().any(|value| value.is_ascii_alphabetic())
@@ -21,24 +29,24 @@ pub fn is_english_title(title: &str) -> bool {
         })
 }
 
-/// Return only credential presence, never credential contents, to the WebView.
-pub fn has_api_key() -> AppResult<bool> {
-    match credential_entry()?.get_password() {
-        Ok(value) => Ok(!value.trim().is_empty()),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(error) => Err(credential_error(error)),
-    }
+/// Return only credential presence, loading the vault at most once per application process.
+pub fn has_api_key(cache: &Mutex<CredentialCache>) -> AppResult<bool> {
+    Ok(cached_api_key(cache)?.is_some())
 }
 
-/// Store a non-empty API key in the operating-system credential vault.
-pub fn save_api_key(api_key: &str) -> AppResult<()> {
+/// Store a non-empty API key in the operating-system vault and refresh the memory cache.
+pub fn save_api_key(cache: &Mutex<CredentialCache>, api_key: &str) -> AppResult<()> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
         return Err(AppError::InvalidInput("API Key 不能为空".into()));
     }
     credential_entry()?
         .set_password(api_key)
-        .map_err(credential_error)
+        .map_err(credential_error)?;
+    let mut cache = cache.lock().map_err(|_| AppError::PoisonedState)?;
+    cache.loaded = true;
+    cache.api_key = Some(api_key.to_owned());
+    Ok(())
 }
 
 /// Translate a database-owned title and accept only a compact plain-text model response.
@@ -46,6 +54,7 @@ pub fn translate_title(
     topic_id: i64,
     title: &str,
     settings: &ModelSettings,
+    cache: &Mutex<CredentialCache>,
 ) -> AppResult<TranslationResult> {
     if title.chars().count() > 500 {
         return Err(AppError::InvalidInput("标题过长，无法翻译".into()));
@@ -57,15 +66,14 @@ pub fn translate_title(
     let local_endpoint = endpoint
         .host_str()
         .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
-    let api_key = match credential_entry()?.get_password() {
-        Ok(value) => Some(value),
-        Err(keyring::Error::NoEntry) if local_endpoint => None,
-        Err(keyring::Error::NoEntry) => {
+    let api_key = match cached_api_key(cache)? {
+        Some(value) => Some(value),
+        None if local_endpoint => None,
+        None => {
             return Err(AppError::InvalidInput(
                 "请先在模型设置中保存 API Key".into(),
             ))
         }
-        Err(error) => return Err(credential_error(error)),
     };
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
@@ -126,6 +134,22 @@ fn credential_entry() -> AppResult<Entry> {
     Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_USER).map_err(credential_error)
 }
 
+/// Resolve the credential once, including a remembered missing state, to avoid repeated vault UI.
+fn cached_api_key(cache: &Mutex<CredentialCache>) -> AppResult<Option<String>> {
+    let mut cache = cache.lock().map_err(|_| AppError::PoisonedState)?;
+    if cache.loaded {
+        return Ok(cache.api_key.clone());
+    }
+    let api_key = match credential_entry()?.get_password() {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        Ok(_) | Err(keyring::Error::NoEntry) => None,
+        Err(error) => return Err(credential_error(error)),
+    };
+    cache.loaded = true;
+    cache.api_key.clone_from(&api_key);
+    Ok(api_key)
+}
+
 fn credential_error(error: keyring::Error) -> AppError {
     AppError::Initialization(format!("系统凭据库不可用：{error}"))
 }
@@ -155,6 +179,20 @@ mod tests {
                 .expect("local URL should resolve")
                 .as_str(),
             "http://localhost:11434/v1/chat/completions"
+        );
+    }
+
+    /// A loaded process cache must satisfy repeated checks without touching the platform vault.
+    #[test]
+    fn reuses_loaded_credential_cache() {
+        let cache = Mutex::new(CredentialCache {
+            loaded: true,
+            api_key: Some("test-key".into()),
+        });
+        assert!(has_api_key(&cache).expect("cached key should be available"));
+        assert_eq!(
+            cached_api_key(&cache).expect("cached key should load"),
+            Some("test-key".into())
         );
     }
 }

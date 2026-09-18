@@ -374,7 +374,7 @@ impl<'connection> TopicRepository<'connection> {
             let identity = identify_topic(topic)?;
             let existing = transaction
                 .query_row(
-                    "SELECT id, source_key, identity_kind FROM topic
+                    "SELECT id, source_key, identity_kind, title FROM topic
                      WHERE platform_id = ? AND dedupe_hash = ?",
                     params![platform.id, identity.hash.as_slice()],
                     |row| {
@@ -382,22 +382,31 @@ impl<'connection> TopicRepository<'connection> {
                             row.get::<_, i64>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
                 .optional()?;
-            let topic_id = if let Some((id, source_key, identity_kind)) = existing {
+            let topic_id = if let Some((id, source_key, identity_kind, stored_title)) = existing {
                 if source_key != identity.source_key || identity_kind != identity.kind {
                     return Err(AppError::Initialization(format!(
                         "检测到去重哈希冲突：{}/{}",
                         platform.code, identity.source_key
                     )));
                 }
-                transaction.execute(
-                    "UPDATE topic SET rank = ?, heat = ?, last_collection_run_id = ?,
-                       deleted = 0, update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                    params![topic.rank, topic.heat, run_id, id],
-                )?;
+                if should_repair_legacy_title(&platform.code, &stored_title, &topic.title) {
+                    transaction.execute(
+                        "UPDATE topic SET title = ?, rank = ?, heat = ?, last_collection_run_id = ?,
+                           deleted = 0, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                        params![topic.title, topic.rank, topic.heat, run_id, id],
+                    )?;
+                } else {
+                    transaction.execute(
+                        "UPDATE topic SET rank = ?, heat = ?, last_collection_run_id = ?,
+                           deleted = 0, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                        params![topic.rank, topic.heat, run_id, id],
+                    )?;
+                }
                 stats.updated += 1;
                 id
             } else {
@@ -573,6 +582,11 @@ impl<'connection> TopicRepository<'connection> {
     }
 }
 
+/// Repair titles irreversibly damaged by the early C114 UTF-8 decoder without rewriting valid first-seen text.
+fn should_repair_legacy_title(platform_code: &str, stored: &str, incoming: &str) -> bool {
+    platform_code == "c114" && stored.contains('\u{fffd}') && !incoming.contains('\u{fffd}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +660,67 @@ mod tests {
             })
             .expect("empty filter should be valid");
         assert_eq!(page.total, 0);
+    }
+
+    /// Only a clean C114 recollection may replace a legacy title containing decoding loss.
+    #[test]
+    fn repairs_only_corrupted_c114_titles() {
+        assert!(should_repair_legacy_title(
+            "c114",
+            "�й�ͨ������",
+            "中国通信行业"
+        ));
+        assert!(!should_repair_legacy_title(
+            "c114",
+            "首次正常标题",
+            "后续正常标题"
+        ));
+        assert!(!should_repair_legacy_title("qbitai", "�Ƽ�����", "科技新闻"));
+    }
+
+    /// A clean recollection repairs an existing C114 row while preserving its identity and history.
+    #[test]
+    fn repairs_corrupted_c114_title_during_commit() {
+        let connection = fixture();
+        connection
+            .execute(
+                "UPDATE platform SET code = 'c114', display_name = 'C114通信'",
+                [],
+            )
+            .expect("platform should update");
+        let repository = TopicRepository::new(&connection);
+        let platform = repository
+            .enabled_platforms()
+            .expect("platforms should load")
+            .remove(0);
+        for (title, trigger) in [("�й�ͨ������", "legacy"), ("中国通信行业", "repair")]
+        {
+            let run_id = repository
+                .create_run(platform.id, trigger)
+                .expect("run should start");
+            repository
+                .commit_feed(
+                    &platform,
+                    run_id,
+                    &ParsedFeed {
+                        topics: vec![CollectedTopic {
+                            platform_code: "c114".into(),
+                            stable_id: Some("article-1".into()),
+                            title: title.into(),
+                            url: "https://www.c114.com.cn/news/16/a1.html".into(),
+                            published_time: None,
+                            rank: 1,
+                            heat: None,
+                        }],
+                        fetched_count: 1,
+                        invalid_count: 0,
+                    },
+                )
+                .expect("feed should commit");
+        }
+        let repaired: String = connection
+            .query_row("SELECT title FROM topic", [], |row| row.get(0))
+            .expect("topic should exist");
+        assert_eq!(repaired, "中国通信行业");
     }
 }
