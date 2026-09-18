@@ -85,6 +85,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Versioned notes keep the product summary bilingual while GitHub appends the commit changelog.
+      - name: Check out release notes
+        uses: actions/checkout@v7
+
       # A separate job ensures the release is published only after every native build succeeds.
       - name: Download all installers
         uses: actions/download-artifact@v8
@@ -96,6 +100,7 @@ jobs:
       - name: Create release and attach installers
         uses: softprops/action-gh-release@v3
         with:
+          body_path: .github/release-notes/${{ github.ref_name }}.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
