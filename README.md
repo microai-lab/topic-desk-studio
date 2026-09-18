@@ -63,6 +63,14 @@ The React interface can access local capabilities only through typed Tauri comma
 
 The GitHub Actions workflow builds each package on its native operating system. Release builds use size optimization, LTO, symbol stripping, and `panic = "abort"` to keep installers compact.
 
+### macOS: "Topic Desk Studio.app is damaged" on first launch
+
+The published macOS builds are not yet signed or notarized, so Gatekeeper blocks downloaded copies with a misleading "damaged" message. The app is intact; clear the quarantine attribute once after installing:
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Topic Desk Studio.app"
+```
+
 ## Getting started
 
 ### Prerequisites
