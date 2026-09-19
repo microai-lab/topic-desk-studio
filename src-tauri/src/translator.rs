@@ -11,8 +11,8 @@ use url::Url;
 use crate::error::{AppError, AppResult};
 use crate::models::{ModelSettings, TranslationResult};
 
-const CREDENTIAL_SERVICE: &str = "com.dataelement.topicdesk.studio";
-const CREDENTIAL_USER: &str = "model-api-key";
+const CREDENTIAL_SERVICE: &str = "Topic Desk Studio";
+const CREDENTIAL_USER: &str = "Translation API Key";
 
 /// Process-local secret cache; the operating-system vault remains the persistent source of truth.
 #[derive(Default)]
