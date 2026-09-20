@@ -5,7 +5,7 @@ import { browserControl, browserRequest } from './api'
 import type { BrowserLibrary, BrowserSettings, BrowserStatus } from './api'
 import type { Locale } from './i18n'
 
-type Panel = 'menu' | 'history' | 'downloads' | 'passwords' | 'import' | 'clear' | 'settings' | null
+type Panel = 'menu' | 'history' | 'downloads' | 'import' | 'clear' | 'settings' | null
 export interface BrowserTab { id: string; url: string; title: string; topicId?: number }
 const DEFAULT_SETTINGS: BrowserSettings = { searchEngine: 'bing', zoom: 1, rememberHistory: true }
 const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
@@ -23,11 +23,13 @@ function Icon({ name }: { name: 'back' | 'forward' | 'reload' | 'more' | 'expand
 }
 
 /** Host a native browser while React owns the address bar, overlays and layout. */
-export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onActivate, onNewTab, onUpdateTab, onCloseTab, onExpand, onClose, onResize }: {
+export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onActivate, onNewTab, onUpdateTab, onCloseTab, onExpand, onCollectXiaohongshu, onClose, onResize }: {
   tabs: BrowserTab[]; activeTabId: string; locale: Locale; expanded: boolean; closing?: boolean
   onActivate: (id: string) => void; onNewTab: () => void
   onUpdateTab: (id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>) => void
-  onCloseTab: (id: string) => void; onExpand: () => void; onClose: () => void; onResize: (width: number) => void
+  onCloseTab: (id: string) => void; onExpand: () => void
+  onCollectXiaohongshu: (tabId: string) => Promise<string>
+  onClose: () => void; onResize: (width: number) => void
 }) {
   const viewport = useRef<HTMLDivElement>(null)
   const addressInput = useRef<HTMLInputElement>(null)
@@ -40,7 +42,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   const [preview, setPreview] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [library, setLibrary] = useState<BrowserLibrary>({ history: [], downloads: [], passwords: [], settings: DEFAULT_SETTINGS })
+  const [library, setLibrary] = useState<BrowserLibrary>({ history: [], downloads: [], settings: DEFAULT_SETTINGS })
   const [busy, setBusy] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
   const [findText, setFindText] = useState('')
@@ -50,9 +52,8 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   const [deviceWidth, setDeviceWidth] = useState(390)
   const [deviceHeight, setDeviceHeight] = useState(844)
   const [filter, setFilter] = useState('')
-  const [importKind, setImportKind] = useState<'importCookies' | 'importPasswords'>('importCookies')
   const [importText, setImportText] = useState('')
-  const [clear, setClear] = useState({ history: true, cookies: false, passwords: false, downloads: false })
+  const [clear, setClear] = useState({ history: true, cookies: false, downloads: false })
   const zh = locale === 'zh'
   const t = (cn: string, en: string): string => zh ? cn : en
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]
@@ -187,8 +188,12 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   })
 
   const menuItem = (cn: string, en: string, operation: () => void, disabled = false, hint?: string) => <button className="browser-menu-item" type="button" disabled={disabled} onClick={operation}><span>{t(cn, en)}</span>{hint ? <small>{hint}</small> : null}</button>
-  const panelTitle = panel === 'history' ? t('历史记录', 'History') : panel === 'downloads' ? t('下载', 'Downloads') : panel === 'passwords' ? t('密码和自动填充', 'Passwords and autofill') : panel === 'import' ? t('导入 Cookie 和密码', 'Import cookies and passwords') : panel === 'clear' ? t('清除浏览数据', 'Clear browsing data') : t('浏览器设置', 'Browser settings')
+  const panelTitle = panel === 'history' ? t('历史记录', 'History') : panel === 'downloads' ? t('下载', 'Downloads') : panel === 'import' ? t('导入 Cookie', 'Import cookies') : panel === 'clear' ? t('清除浏览数据', 'Clear browsing data') : t('浏览器设置', 'Browser settings')
   const hasPage = status.url !== ''
+  const isXiaohongshu = (() => {
+    try { const host = new URL(status.url).hostname; return host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com') }
+    catch { return false }
+  })()
 
   return <aside className={`browser-pane browser-chrome${device ? ' device-mode' : ''}${closing ? ' browser-pane-closing' : ''}`} aria-label={t('内置浏览器', 'Browser')}>
     <div className="reader-divider" role="separator" aria-label={t('调整浏览器宽度', 'Resize browser')} aria-orientation="vertical" tabIndex={0}
@@ -211,6 +216,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
       <button className="browser-icon-button" disabled={!status.canForward} title={t('前进', 'Forward')} onClick={() => void browserRequest('forward', activeTabId).catch(fail)}><Icon name="forward" /></button>
       <button className={`browser-icon-button${status.loading ? ' is-loading' : ''}`} disabled={!hasPage} title={t('刷新', 'Reload')} onClick={() => void browserRequest('reload', activeTabId).catch(fail)}><Icon name="reload" /></button>
       <form className="browser-address" onSubmit={(event) => { event.preventDefault(); void openAddress(address).catch(fail) }}><input ref={addressInput} aria-label={t('搜索或输入网址', 'Search or enter URL')} placeholder={t('搜索或输入网址', 'Search or enter URL')} value={address} spellCheck={false} autoComplete="off" onChange={(event) => setAddress(event.target.value)} onFocus={(event) => event.target.select()} /></form>
+      {isXiaohongshu ? <button className="browser-collect-button" disabled={busy || status.loading} onClick={() => void perform(async () => setNotice(await onCollectXiaohongshu(activeTabId)))}>{busy ? t('采集中…', 'Collecting…') : t('采集当前页', 'Collect page')}</button> : null}
       <button className={`browser-icon-button${device ? ' active' : ''}`} title={t('显示设备工具栏', 'Show device toolbar')} onClick={() => setDevice((value) => !value)}><Icon name="device" /></button>
       <button className={`browser-icon-button${panel === 'menu' ? ' active' : ''}`} aria-expanded={panel === 'menu'} title={t('更多', 'More')} onClick={() => void showPanel(panel === 'menu' ? null : 'menu').catch(fail)}><Icon name="more" /></button>
     </header>
@@ -230,23 +236,20 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
           <div className="browser-zoom-row"><span>{t('缩放', 'Zoom')}</span><div className="browser-zoom-controls"><button disabled={!hasPage || library.settings.zoom <= .25} onClick={() => stepZoom(-1)}>−</button><button disabled={!hasPage} title={t('重置缩放', 'Reset zoom')} onClick={() => void setZoom(1).catch(fail)}>{Math.round(library.settings.zoom * 100)}%</button><button disabled={!hasPage || library.settings.zoom >= 3} onClick={() => stepZoom(1)}>＋</button></div><button className="browser-icon-button" disabled={!hasPage} title={t('重置缩放', 'Reset zoom')} onClick={() => void setZoom(1).catch(fail)}><Icon name="reload" /></button></div><hr />
           {menuItem(device ? '隐藏设备工具栏' : '显示设备工具栏', device ? 'Hide device toolbar' : 'Show device toolbar', () => { void showPanel(null).then(() => setDevice(!device)).catch(fail) })}
           {menuItem('截取屏幕截图', 'Capture screenshot', () => void nativeAction('screenshot'), !hasPage || busy)}<hr />
-          {menuItem('导入 Cookie 和密码…', 'Import cookies and passwords…', () => void showPanel('import').catch(fail))}
-          {menuItem('密码和自动填充', 'Passwords and autofill', () => void showPanel('passwords').catch(fail), false, '›')}
+          {menuItem('导入 Cookie…', 'Import cookies…', () => void showPanel('import').catch(fail))}
           {menuItem('下载', 'Downloads', () => void showPanel('downloads').catch(fail))}
           {menuItem('历史记录', 'History', () => void showPanel('history').catch(fail))}
           {menuItem('清除浏览数据', 'Clear browsing data', () => void showPanel('clear').catch(fail))}<hr />
           {menuItem('浏览器设置', 'Browser settings', () => void showPanel('settings').catch(fail))}
         </div> : <section className="browser-management" aria-label={panelTitle}>
           <header><h2>{panelTitle}</h2><button className="browser-icon-button" title={t('返回网页', 'Return to page')} onClick={() => void showPanel(null).catch(fail)}><Icon name="close" /></button></header>
-          {['history', 'downloads', 'passwords'].includes(panel) ? <>
+          {['history', 'downloads'].includes(panel) ? <>
             <input className="browser-library-filter" aria-label={t('搜索记录', 'Search records')} placeholder={t('搜索记录…', 'Search records…')} value={filter} onChange={(e) => setFilter(e.target.value)} />
-            {panel === 'passwords' ? <p className="browser-panel-help">{t('密码保存在系统钥匙串中。填充仅限同一网站，且不会自动提交。', 'Passwords stay in the OS vault. Fill only on the matching website; forms are never submitted automatically.')}</p> : null}
-            {(panel === 'history' ? library.history : panel === 'downloads' ? library.downloads : library.passwords).filter((row) => `${row.title} ${row.url}`.toLowerCase().includes(filter.toLowerCase())).map((row) => <div className="browser-record" key={row.id}><div><strong>{row.title || row.url}</strong><small>{row.url}</small><small>{new Date(row.time).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US')}{panel === 'downloads' ? ` · ${row.detail.startsWith('complete') ? t('已完成', 'Complete') : t('失败', 'Failed')}` : ''}</small></div>{panel === 'history' ? <button onClick={() => void openAddress(row.url).catch(fail)}>{t('打开', 'Open')}</button> : panel === 'downloads' ? <button onClick={() => void browserControl({ kind: 'revealDownload', id: row.id }).catch(fail)}>{t('显示文件', 'Show file')}</button> : <><button onClick={() => void perform(async () => { await showPanel(null); await browserControl({ kind: 'fillPassword', id: row.id }) }, t('已填充，请检查后登录', 'Filled. Review before signing in.'))}>{t('填充', 'Fill')}</button><button onClick={() => void perform(async () => { await browserControl({ kind: 'deletePassword', id: row.id }); await refreshLibrary() })}>{t('删除', 'Delete')}</button></>}</div>)}
-            {(panel === 'history' ? library.history : panel === 'downloads' ? library.downloads : library.passwords).length === 0 ? <p className="browser-panel-empty">{t('暂无记录', 'No records yet')}</p> : null}
-            {panel === 'passwords' ? <button className="browser-panel-primary" onClick={() => { setImportKind('importPasswords'); void showPanel('import').catch(fail) }}>{t('导入登录信息', 'Import logins')}</button> : null}
+            {(panel === 'history' ? library.history : library.downloads).filter((row) => `${row.title} ${row.url}`.toLowerCase().includes(filter.toLowerCase())).map((row) => <div className="browser-record" key={row.id}><div><strong>{row.title || row.url}</strong><small>{row.url}</small><small>{new Date(row.time).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US')}{panel === 'downloads' ? ` · ${row.detail.startsWith('complete') ? t('已完成', 'Complete') : t('失败', 'Failed')}` : ''}</small></div>{panel === 'history' ? <button onClick={() => void openAddress(row.url).catch(fail)}>{t('打开', 'Open')}</button> : <button onClick={() => void browserControl({ kind: 'revealDownload', id: row.id }).catch(fail)}>{t('显示文件', 'Show file')}</button>}</div>)}
+            {(panel === 'history' ? library.history : library.downloads).length === 0 ? <p className="browser-panel-empty">{t('暂无记录', 'No records yet')}</p> : null}
           </> : null}
-          {panel === 'import' ? <><p className="browser-panel-help">{t('粘贴浏览器导出的 Cookie JSON，或密码 CSV（url、username、password 列）。仅导入你信任的内容。', 'Paste exported Cookie JSON or password CSV (url, username, password columns). Import only trusted data.')}</p><select aria-label={t('导入类型', 'Import type')} value={importKind} onChange={(e) => { setImportKind(e.target.value as typeof importKind); setImportText('') }}><option value="importCookies">Cookie JSON</option><option value="importPasswords">{t('密码 CSV / JSON', 'Password CSV / JSON')}</option></select><textarea spellCheck={false} autoComplete="off" aria-label={t('导入数据', 'Import data')} placeholder={importKind === 'importCookies' ? '[{"name":"session","value":"…","domain":"example.com"}]' : 'url,username,password'} value={importText} onChange={(e) => setImportText(e.target.value)} /><button className="browser-panel-primary" disabled={busy || !importText.trim() || (importKind === 'importCookies' && !hasPage)} onClick={() => void perform(async () => { const result = await browserControl<{ count: number }>({ kind: importKind, content: importText }); setImportText(''); await refreshLibrary(); setNotice(t(`已导入 ${result.count} 项`, `Imported ${result.count} items`)) })}>{busy ? t('正在导入…', 'Importing…') : t('导入', 'Import')}</button>{importKind === 'importCookies' && !hasPage ? <p>{t('请先打开任意网页，初始化浏览器会话。', 'Open a webpage first to initialize the browser session.')}</p> : null}</> : null}
-          {panel === 'clear' ? <><p className="browser-panel-help">{t('选择要清除的数据。Cookie 与网站数据清除后可能需要重新登录；下载记录清除不会删除文件。', 'Choose what to clear. Clearing cookies and site data may sign you out. Clearing download records keeps the files.')}</p>{(['history', 'cookies', 'passwords', 'downloads'] as const).map((key) => <label className="browser-check" key={key}><input type="checkbox" checked={clear[key]} onChange={(e) => setClear({ ...clear, [key]: e.target.checked })} />{({ history: t('浏览历史', 'Browsing history'), cookies: t('Cookie、缓存和网站数据', 'Cookies, cache and site data'), passwords: t('已保存的密码', 'Saved passwords'), downloads: t('下载记录', 'Download records') })[key]}</label>)}<button className="browser-panel-primary danger" disabled={busy || !Object.values(clear).some(Boolean)} onClick={() => void perform(async () => { await browserControl({ kind: 'clear', ...clear }); await refreshLibrary() }, t('所选浏览数据已清除', 'Selected browsing data cleared'))}>{t('确认清除所选数据', 'Confirm and clear selected data')}</button></> : null}
+          {panel === 'import' ? <><p className="browser-panel-help">{t('粘贴浏览器导出的 Cookie JSON。仅导入你信任的内容。', 'Paste exported Cookie JSON. Import only trusted data.')}</p><textarea spellCheck={false} autoComplete="off" aria-label={t('导入数据', 'Import data')} placeholder='[{"name":"session","value":"…","domain":"example.com"}]' value={importText} onChange={(e) => setImportText(e.target.value)} /><button className="browser-panel-primary" disabled={busy || !importText.trim() || !hasPage} onClick={() => void perform(async () => { const result = await browserControl<{ count: number }>({ kind: 'importCookies', content: importText }); setImportText(''); await refreshLibrary(); setNotice(t(`已导入 ${result.count} 项`, `Imported ${result.count} items`)) })}>{busy ? t('正在导入…', 'Importing…') : t('导入', 'Import')}</button>{!hasPage ? <p>{t('请先打开任意网页，初始化浏览器会话。', 'Open a webpage first to initialize the browser session.')}</p> : null}</> : null}
+          {panel === 'clear' ? <><p className="browser-panel-help">{t('选择要清除的数据。Cookie 与网站数据清除后可能需要重新登录；下载记录清除不会删除文件。', 'Choose what to clear. Clearing cookies and site data may sign you out. Clearing download records keeps the files.')}</p>{(['history', 'cookies', 'downloads'] as const).map((key) => <label className="browser-check" key={key}><input type="checkbox" checked={clear[key]} onChange={(e) => setClear({ ...clear, [key]: e.target.checked })} />{({ history: t('浏览历史', 'Browsing history'), cookies: t('Cookie、缓存和网站数据', 'Cookies, cache and site data'), downloads: t('下载记录', 'Download records') })[key]}</label>)}<button className="browser-panel-primary danger" disabled={busy || !Object.values(clear).some(Boolean)} onClick={() => void perform(async () => { await browserControl({ kind: 'clear', ...clear }); await refreshLibrary() }, t('所选浏览数据已清除', 'Selected browsing data cleared'))}>{t('确认清除所选数据', 'Confirm and clear selected data')}</button></> : null}
           {panel === 'settings' ? <><label className="browser-setting"><span>{t('搜索引擎', 'Search engine')}</span><select value={library.settings.searchEngine} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, searchEngine: e.target.value as BrowserSettings['searchEngine'] } })}><option value="bing">Bing</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option></select></label><label className="browser-setting"><span>{t('默认缩放', 'Default zoom')}</span><select value={library.settings.zoom} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, zoom: Number(e.target.value) } })}>{ZOOMS.map((zoom) => <option key={zoom} value={zoom}>{Math.round(zoom * 100)}%</option>)}</select></label><label className="browser-check"><input type="checkbox" checked={library.settings.rememberHistory} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, rememberHistory: e.target.checked } })} />{t('保存浏览历史', 'Save browsing history')}</label><button className="browser-panel-primary" disabled={busy} onClick={() => void perform(() => browserControl({ kind: 'settings', settings: library.settings }), t('设置已保存', 'Settings saved'))}>{t('保存设置', 'Save settings')}</button></> : null}
         </section>}
       </div> : null}

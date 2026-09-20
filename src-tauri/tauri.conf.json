@@ -18,6 +18,7 @@
         "minWidth": 860,
         "minHeight": 620,
         "resizable": true,
+        "incognito": true,
         "fullscreen": false
       }
     ],

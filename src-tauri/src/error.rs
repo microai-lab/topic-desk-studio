@@ -13,6 +13,8 @@ pub enum AppError {
     PoisonedState,
     #[error("输入无效：{0}")]
     InvalidInput(String),
+    #[error("凭据处理失败：{0}")]
+    Credential(String),
     #[error("应用初始化失败：{0}")]
     Initialization(String),
     #[error("采集失败：{0}")]

@@ -5,6 +5,7 @@ mod browser_profile;
 mod catalog;
 mod collector;
 mod commands;
+mod credential_cipher;
 mod database;
 mod desktop;
 mod error;
@@ -14,8 +15,9 @@ mod repository;
 mod translator;
 
 use commands::{
-    browser_request, get_model_settings, list_topics, refresh_topics, save_model_settings,
-    set_platform_enabled, set_topic_queued, translate_topic, AppState,
+    browser_request, collect_xiaohongshu_session, get_model_settings, get_network_settings,
+    get_ui_preferences, list_topics, refresh_topics, save_model_settings, save_network_settings,
+    save_ui_preferences, set_platform_enabled, set_topic_queued, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +34,8 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("无法解析应用数据目录：{error}"))?;
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|error| format!("无法创建应用数据目录：{error}"))?;
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
@@ -41,9 +45,6 @@ pub fn run() {
                 database: std::sync::Mutex::new(database),
                 database_path: database_path.clone(),
                 refreshing: Arc::clone(&refreshing),
-                api_key_cache: Arc::new(std::sync::Mutex::new(
-                    translator::CredentialCache::default(),
-                )),
             });
 
             // A detached scheduler keeps desktop refreshes independent from WebView visibility.
@@ -67,8 +68,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_topics,
             refresh_topics,
+            collect_xiaohongshu_session,
             get_model_settings,
             save_model_settings,
+            get_ui_preferences,
+            save_ui_preferences,
+            get_network_settings,
+            save_network_settings,
             set_platform_enabled,
             set_topic_queued,
             translate_topic,

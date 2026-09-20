@@ -140,7 +140,7 @@ pub struct CollectionStats {
     pub inserted_topic_ids: Vec<i64>,
 }
 
-/// Non-secret model routing plus a boolean credential-presence indicator for the settings UI.
+/// Model routing plus a boolean credential-presence indicator for the settings UI.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
@@ -149,13 +149,81 @@ pub struct ModelSettings {
     pub has_api_key: bool,
 }
 
-/// Settings update; an omitted API key preserves the credential already in the OS vault.
+/// Settings update; an omitted API key preserves the credential already stored in SQLite.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveModelSettings {
     pub endpoint: String,
     pub model: String,
     pub api_key: Option<String>,
+}
+
+/// Supported interface languages stored as native application settings.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLocale {
+    Zh,
+    En,
+}
+
+impl UiLocale {
+    /// Return the stable SQLite representation shared across application versions.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Zh => "zh",
+            Self::En => "en",
+        }
+    }
+}
+
+/// Supported appearance choices stored outside the temporary main WebView.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UiTheme {
+    Light,
+    Dark,
+    System,
+}
+
+impl UiTheme {
+    /// Return the stable SQLite representation shared across application versions.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        }
+    }
+}
+
+/// Optional persisted choices let a first run retain browser-language defaults.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UiPreferences {
+    pub locale: Option<UiLocale>,
+    pub theme: Option<UiTheme>,
+}
+
+/// Complete validated preference update received from the trusted main interface.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveUiPreferences {
+    pub locale: UiLocale,
+    pub theme: UiTheme,
+}
+
+/// Optional application-wide proxy used only by native network clients.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSettings {
+    pub proxy_url: Option<String>,
+}
+
+/// A blank proxy value explicitly restores direct network access.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveNetworkSettings {
+    pub proxy_url: String,
 }
 
 /// One generated translation returned to the topic card.

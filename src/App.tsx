@@ -1,7 +1,8 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  browserRequest, getModelSettings, listTopics, refreshTopics, saveModelSettings,
+  browserRequest, collectXiaohongshuSession, getModelSettings, getNetworkSettings, getUiPreferences,
+  listTopics, refreshTopics, saveModelSettings, saveNetworkSettings, saveUiPreferences,
   setPlatformEnabled, setTopicQueued, translateTopic,
 } from './api'
 import { BrowserPane } from './BrowserPane'
@@ -101,15 +102,31 @@ export function App() {
   // ── Locale & theme ──────────────────────────────────────────────
   const [locale, setLocale] = useState<Locale>(detectLocale)
   const [theme, setTheme]   = useState<Theme>(detectTheme)
+  const [uiPreferencesReady, setUiPreferencesReady] = useState(false)
   const m = messages[locale]
+
+  useEffect(() => {
+    let active = true
+    void getUiPreferences()
+      .then((preferences) => {
+        if (!active) return
+        if (preferences.locale !== null) setLocale(preferences.locale)
+        if (preferences.theme !== null) setTheme(preferences.theme)
+      })
+      .catch((reason: unknown) => console.error('Failed to load UI preferences', reason))
+      .finally(() => { if (active) setUiPreferencesReady(true) })
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     applyTheme(theme)
   }, [theme])
 
   useEffect(() => {
-    localStorage.setItem('tds-locale', locale)
-  }, [locale])
+    if (!uiPreferencesReady) return
+    void saveUiPreferences({ locale, theme })
+      .catch((reason: unknown) => console.error('Failed to save UI preferences', reason))
+  }, [locale, theme, uiPreferencesReady])
 
   // ── View state ──────────────────────────────────────────────────
   const [browserOpen, setBrowserOpen] = useState(false)
@@ -147,6 +164,8 @@ export function App() {
   const [modelName,       setModelName]          = useState('deepseek-chat')
   const [apiKey,          setApiKey]             = useState('')
   const [savingSettings,  setSavingSettings]     = useState(false)
+  const [proxyUrl,        setProxyUrl]           = useState('')
+  const [savingNetwork,   setSavingNetwork]      = useState(false)
 
   /** Browser tabs live above the panel so hiding it does not discard the session. */
   const addBrowserTab = useCallback((tab?: Omit<BrowserTab, 'id'>): void => {
@@ -192,6 +211,18 @@ export function App() {
   const openTopic = useCallback((topic: TopicView): void => {
     addBrowserTab({ url: topic.url, title: topic.title, topicId: topic.id })
   }, [addBrowserTab])
+
+  const openXiaohongshuSession = (): void => {
+    switchView(prevView)
+    addBrowserTab({ url: 'https://www.xiaohongshu.com/explore', title: m.xhsLoginCollect })
+  }
+
+  const collectXiaohongshu = async (tabId: string): Promise<string> => {
+    const result = await collectXiaohongshuSession(tabId)
+    setInsertedTopicIds(result.insertedTopicIds)
+    await load()
+    return result.message
+  }
 
   const updateBrowserTab = useCallback((id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>): void => {
     setBrowserTabs((current) => current.map((tab) => tab.id === id ? { ...tab, ...update } : tab))
@@ -252,6 +283,8 @@ export function App() {
       setModelEndpoint(s.endpoint)
       setModelName(s.model)
     }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+    void getNetworkSettings().then((s) => setProxyUrl(s.proxyUrl ?? ''))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [view])
 
   // ── Actions ──────────────────────────────────────────────────────
@@ -300,6 +333,17 @@ export function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally { setSavingSettings(false) }
+  }
+
+  const saveNetwork = async (): Promise<void> => {
+    setSavingNetwork(true); setError(undefined); setNotice(undefined)
+    try {
+      const settings = await saveNetworkSettings({ proxyUrl })
+      setProxyUrl(settings.proxyUrl ?? '')
+      setNotice(m.networkSaveNotice)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally { setSavingNetwork(false) }
   }
 
   const switchView = (next: ViewMode): void => {
@@ -379,6 +423,27 @@ export function App() {
                     </div>
                   </div>
                 </div>
+
+                {/* Native collection traffic never crosses the WebView network boundary. */}
+                <div className="pref-section">
+                  <p className="pref-section-title">{m.sectionNetwork}</p>
+                  <div className="network-setting">
+                    <label>
+                      <span>{m.labelProxy}</span>
+                      <input
+                        value={proxyUrl}
+                        onChange={(event) => setProxyUrl(event.target.value)}
+                        placeholder={m.proxyPlaceholder}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                    </label>
+                    <p>{m.proxyHelp}</p>
+                    <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
+                      {savingNetwork ? m.btnSaving : m.btnSave}
+                    </button>
+                  </div>
+                </div>
               </>
             )}
 
@@ -389,10 +454,13 @@ export function App() {
                     <span className={`health-dot ${status.status === 'failed' ? 'failed' : status.status === 'succeeded' ? 'healthy' : ''}`} />
                     <div className="source-row-info">
                       <span className="source-row-name">{status.displayName}</span>
-                      <span className="source-row-meta">
+                      <span className="source-row-meta" title={status.error ?? undefined}>
                         {status.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status.error ?? (status.lastRunAt === null ? m.notCollected : m.topicCount(status.topicCount))}
                       </span>
                     </div>
+                    {status.code === 'xiaohongshu' ? (
+                      <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button>
+                    ) : null}
                     <label className="switch">
                       <input type="checkbox" checked={status.enabled} onChange={(e) => void changePlatform(status.code, e.target.checked)} />
                       <span />
@@ -475,7 +543,17 @@ export function App() {
       <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) && !readerExpanded ? `minmax(320px, ${100 - readerWidth}fr) minmax(0, ${readerWidth}fr)` : undefined }}>
       <main className="topic-list-pane">
         <header className="topbar">
-          <h1>{viewTitle}</h1>
+          <div className="topbar-main">
+            <h1>{viewTitle}</h1>
+            <label className="topbar-search">
+              <input
+                aria-label={m.filterSearch}
+                value={search}
+                placeholder={m.filterSearchPlaceholder}
+                onChange={(e) => { setSearch(e.target.value); setPageIndex(0) }}
+              />
+            </label>
+          </div>
           <div className="topbar-actions">
             <button className="primary-button" type="button" disabled={refreshing} onClick={() => void collect()}>
               {refreshing ? m.btnRefreshing : m.btnRefresh}
@@ -509,10 +587,6 @@ export function App() {
               <option value="finance">{m.filterFinance}</option>
               <option value="developer">{m.filterDev}</option>
             </select>
-          </label>
-          <label className="search-field">
-            <span>{m.filterSearch}</span>
-            <input value={search} placeholder={m.filterSearchPlaceholder} onChange={(e) => { setSearch(e.target.value); setPageIndex(0) }} />
           </label>
           <label>
             <span>{m.filterSort}</span>
@@ -560,6 +634,7 @@ export function App() {
       {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing}
         onActivate={setActiveBrowserTabId} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
         onExpand={() => setReaderExpanded((value) => !value)}
+        onCollectXiaohongshu={collectXiaohongshu}
         onClose={closeBrowser}
         onResize={setReaderWidth} /> : null}
       </div>

@@ -68,11 +68,18 @@ export interface Messages {
   sectionLanguage: string
   langZh: string
   langEn: string
+  sectionNetwork: string
+  labelProxy: string
+  proxyPlaceholder: string
+  proxyHelp: string
+  networkSaveNotice: string
   // Sources tab
   regionDomestic: string
   regionIntl: string
   notCollected: string
   topicCount: (n: number) => string
+  xhsLoginCollect: string
+  xhsCollectPage: string
   // Model tab
   modelHeading: string
   modelDesc: string
@@ -141,20 +148,27 @@ const zh: Messages = {
   sectionLanguage: '语言',
   langZh: '中文',
   langEn: 'English',
+  sectionNetwork: '采集网络',
+  labelProxy: 'HTTP(S) 代理',
+  proxyPlaceholder: '例如 http://127.0.0.1:7897',
+  proxyHelp: '仅直连受限的境外来源使用该代理；国内及可直连来源保持直连。留空表示全部直连。',
+  networkSaveNotice: '采集代理设置已保存。',
   regionDomestic: '国内',
   regionIntl: '国际',
   notCollected: '尚未采集',
   topicCount: (n) => `${n} 条话题`,
+  xhsLoginCollect: '登录采集',
+  xhsCollectPage: '采集当前页',
   modelHeading: '英文标题翻译',
-  modelDesc: '接口地址与模型名保存在本地 SQLite；API Key 仅进入操作系统凭据库，不会返回页面。',
+  modelDesc: '接口地址与模型名保存在本地 SQLite；API Key 加密后入库，仅在调用模型时于内存解密。',
   labelEndpoint: '接口地址',
   labelModel: '模型名称',
   labelApiKey: 'API Key',
-  apiKeyPlaceholder: '输入后保存到系统凭据库',
-  apiKeySavedPlaceholder: '已安全保存；留空表示不修改',
+  apiKeyPlaceholder: '输入后加密保存到本地 SQLite',
+  apiKeySavedPlaceholder: '已保存；留空表示不修改',
   btnSave: '保存设置',
   btnSaving: '保存中…',
-  saveNotice: '模型设置已保存，API Key 已交给系统凭据库管理。',
+  saveNotice: '模型设置已保存到本地 SQLite。',
 }
 
 const en: Messages = {
@@ -212,35 +226,38 @@ const en: Messages = {
   sectionLanguage: 'Language',
   langZh: '中文',
   langEn: 'English',
+  sectionNetwork: 'Collection network',
+  labelProxy: 'HTTP(S) proxy',
+  proxyPlaceholder: 'For example http://127.0.0.1:7897',
+  proxyHelp: 'Only restricted international sources use this proxy. Domestic and directly reachable sources remain direct. Leave blank to make every source direct.',
+  networkSaveNotice: 'Collection proxy saved.',
   regionDomestic: 'China',
   regionIntl: 'Intl',
   notCollected: 'Not yet collected',
   topicCount: (n) => `${n} topic${n !== 1 ? 's' : ''}`,
+  xhsLoginCollect: 'Login & collect',
+  xhsCollectPage: 'Collect page',
   modelHeading: 'Title Translation',
-  modelDesc: 'Endpoint and model name are stored locally in SQLite. Your API key goes only into the OS credential store and is never returned to the page.',
+  modelDesc: 'Endpoint and model name are stored in SQLite. The API key is encrypted at rest and decrypted in memory only for model calls.',
   labelEndpoint: 'Endpoint',
   labelModel: 'Model',
   labelApiKey: 'API Key',
-  apiKeyPlaceholder: 'Saved to system keychain',
-  apiKeySavedPlaceholder: 'Saved securely — leave blank to keep',
+  apiKeyPlaceholder: 'Encrypted in local SQLite',
+  apiKeySavedPlaceholder: 'Saved — leave blank to keep',
   btnSave: 'Save settings',
   btnSaving: 'Saving…',
-  saveNotice: 'Settings saved. API key stored in system keychain.',
+  saveNotice: 'Model settings saved to local SQLite.',
 }
 
 export const messages: Record<Locale, Messages> = { zh, en }
 
-/** Read saved locale from localStorage, falling back to browser language. */
+/** Choose the initial locale before Rust-backed preferences finish loading. */
 export function detectLocale(): Locale {
-  const saved = localStorage.getItem('tds-locale') as Locale | null
-  if (saved === 'zh' || saved === 'en') return saved
   return navigator.language.startsWith('zh') ? 'zh' : 'en'
 }
 
-/** Read saved theme preference from localStorage. */
+/** Use the operating-system appearance until Rust-backed preferences finish loading. */
 export function detectTheme(): Theme {
-  const saved = localStorage.getItem('tds-theme') as Theme | null
-  if (saved === 'light' || saved === 'dark' || saved === 'system') return saved
   return 'system'
 }
 
@@ -252,5 +269,4 @@ export function applyTheme(theme: Theme): void {
   } else {
     root.dataset.theme = theme
   }
-  localStorage.setItem('tds-theme', theme)
 }

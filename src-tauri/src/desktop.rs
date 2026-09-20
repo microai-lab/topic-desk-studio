@@ -70,6 +70,36 @@ fn is_article_url(url: &url::Url) -> bool {
         && !(matches!(url.host_str(), Some("127.0.0.1" | "localhost")) && url.port() == Some(1420))
 }
 
+/// Baidu's risk-control challenge opens a real auxiliary browsing context and
+/// completes through `window.opener`. Replacing that popup with a navigation in
+/// the article pane loses the opener and its ephemeral cookie session, so only
+/// Baidu-owned identity/challenge hosts are allowed to create the native popup.
+fn is_baidu_verification_url(url: &url::Url) -> bool {
+    is_article_url(url)
+        && matches!(
+            url.host_str(),
+            Some(
+                "wappass.baidu.com"
+                    | "passport.baidu.com"
+                    | "verify.baidu.com"
+                    | "seccenter.baidu.com"
+            )
+        )
+}
+
+/// Baidu's desktop search endpoint repeatedly challenges embedded WebKit even
+/// after a successful CAPTCHA. Its official mobile endpoint serves the same
+/// query and works in the constrained article view, so adapt only search-result
+/// URLs while preserving the path, query and fragment verbatim.
+fn adapt_article_url(mut url: url::Url) -> url::Url {
+    if url.host_str() == Some("www.baidu.com") && url.path() == "/s" {
+        // The replacement is a fixed valid domain; failure would indicate an
+        // unexpected URL crate invariant, in which case the original is safer.
+        let _ = url.set_host(Some("m.baidu.com"));
+    }
+    url
+}
+
 pub(crate) fn tab_label(tab_id: &str) -> Result<String, String> {
     if tab_id.is_empty()
         || tab_id.len() > 64
@@ -154,7 +184,8 @@ pub fn browser_request(
             let parsed = url
                 .as_deref()
                 .map(|input| browser_profile::resolve_address(input, &engine))
-                .transpose()?;
+                .transpose()?
+                .map(adapt_article_url);
             // The main webview can be inset by native titlebar decoration on macOS.
             // Translate DOM coordinates from that view into its parent window.
             let main = app.get_webview("main").ok_or("主界面不存在")?;
@@ -218,14 +249,10 @@ pub fn browser_request(
                     Arc::new(Mutex::new(HashMap::<String, VecDeque<PathBuf>>::new()));
                 let download_paths = pending_downloads.clone();
                 let builder = WebviewBuilder::new(label, WebviewUrl::External(url))
-                    .data_store_identifier(*b"TopicDeskBrowser")
+                    // Ephemeral article views must never create WebCrypto or password material
+                    // in the operating-system credential store.
+                    .incognito(true)
                     .initialization_script(SINGLE_PANE_LINK_SCRIPT)
-                    .data_directory(
-                        app.path()
-                            .app_data_dir()
-                            .map_err(|e| e.to_string())?
-                            .join("browser-webview"),
-                    )
                     .on_navigation(is_article_url)
                     .on_document_title_changed(move |view, title| {
                         browser_profile::title_changed(view.app_handle(), &title_tab, title)
@@ -301,6 +328,14 @@ pub fn browser_request(
                         true
                     })
                     .on_new_window(move |url, _| {
+                        // WebKit creates an allowed popup with the caller's
+                        // configuration, preserving the non-persistent data
+                        // store and opener relationship required by Baidu's
+                        // verification callback. It remains isolated from all
+                        // Tauri capabilities.
+                        if is_baidu_verification_url(&url) {
+                            return NewWindowResponse::Allow;
+                        }
                         // Returning `Deny` cancels the popup navigation. Route the
                         // validated URL through the trusted main view afterward so
                         // the existing article view can navigate normally.
@@ -385,6 +420,46 @@ mod tests {
             if let Ok(url) = url::Url::parse(value) {
                 assert!(!is_article_url(&url), "navigation must also reject {value}");
             }
+        }
+    }
+
+    #[test]
+    fn allows_only_baidu_identity_hosts_to_keep_popup_context() {
+        for value in [
+            "https://wappass.baidu.com/static/captcha/tuxing.html",
+            "https://passport.baidu.com/v2/?login",
+            "https://verify.baidu.com/challenge",
+            "https://seccenter.baidu.com/security",
+        ] {
+            assert!(is_baidu_verification_url(&url::Url::parse(value).unwrap()));
+        }
+        for value in [
+            "https://www.baidu.com/s?word=test",
+            "https://wappass.baidu.com.evil.example/captcha",
+            "http://passport.example.com/",
+            "javascript:window.close()",
+        ] {
+            assert!(!is_baidu_verification_url(&url::Url::parse(value).unwrap()));
+        }
+    }
+
+    #[test]
+    fn adapts_only_baidu_search_results_for_embedded_webkit() {
+        let desktop =
+            url::Url::parse("https://www.baidu.com/s?word=%E6%B5%8B%E8%AF%95&sa=fyb_news#results")
+                .unwrap();
+        assert_eq!(
+            adapt_article_url(desktop).as_str(),
+            "https://m.baidu.com/s?word=%E6%B5%8B%E8%AF%95&sa=fyb_news#results"
+        );
+
+        for value in [
+            "https://www.baidu.com/",
+            "https://top.baidu.com/board",
+            "https://example.com/s?word=test",
+        ] {
+            let url = url::Url::parse(value).unwrap();
+            assert_eq!(adapt_article_url(url.clone()), url);
         }
     }
 

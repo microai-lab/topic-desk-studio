@@ -1,4 +1,4 @@
-//! Browser-owned SQLite metadata and OS-vault credentials, isolated from topic identity.
+//! Browser-owned history, download metadata and preferences, isolated from topic identity.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ impl Default for BrowserSettings {
     }
 }
 
-/// A browser history, download or credential metadata row. Secrets never leave Rust.
+/// A browser history or download metadata row.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserRecord {
@@ -57,7 +57,6 @@ pub struct BrowserRecord {
 pub struct BrowserLibrary {
     pub history: Vec<BrowserRecord>,
     pub downloads: Vec<BrowserRecord>,
-    pub passwords: Vec<BrowserRecord>,
     pub settings: BrowserSettings,
 }
 
@@ -195,7 +194,7 @@ pub fn title_changed(app: &tauri::AppHandle, tab_id: &str, title: String) {
     publish(app, &status);
 }
 
-/// Return browser metadata; password values stay in the system credential vault.
+/// Return browser history and download metadata without any credential-storage surface.
 pub fn library(app: &tauri::AppHandle) -> Result<BrowserLibrary, String> {
     let profile = app.state::<BrowserProfile>();
     let session = profile.inner.lock().map_err(|e| e.to_string())?;
@@ -218,7 +217,6 @@ pub fn library(app: &tauri::AppHandle) -> Result<BrowserLibrary, String> {
     Ok(BrowserLibrary {
         history: read("history")?,
         downloads: read("download")?,
-        passwords: read("password")?,
         settings: session.settings.clone(),
     })
 }

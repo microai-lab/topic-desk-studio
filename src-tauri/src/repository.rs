@@ -2,11 +2,13 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
+use crate::credential_cipher::{EncryptedCredential, ALGORITHM};
 use crate::error::{AppError, AppResult};
 use crate::identity::identify_topic;
 use crate::models::{
-    CollectionStats, ModelSettings, ParsedFeed, PlatformSource, PlatformStatusView, SourceRegion,
-    TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
+    CollectionStats, ModelSettings, NetworkSettings, ParsedFeed, PlatformSource,
+    PlatformStatusView, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
+    UiLocale, UiPreferences, UiTheme,
 };
 
 /// Resolve a source region without trusting values stored outside the platform catalog.
@@ -258,7 +260,90 @@ impl<'connection> TopicRepository<'connection> {
         Ok(())
     }
 
-    /// Load non-secret model routing; credential presence is filled by the credential service.
+    /// Load UI preferences from SQLite so the temporary main WebView remains stateless.
+    pub fn ui_preferences(&self) -> AppResult<UiPreferences> {
+        let value = |key: &str| -> AppResult<Option<String>> {
+            Ok(self
+                .connection
+                .query_row(
+                    "SELECT value FROM app_setting WHERE key = ?",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        };
+        let locale = match value("ui_locale")?.as_deref() {
+            Some("zh") => Some(UiLocale::Zh),
+            Some("en") => Some(UiLocale::En),
+            Some(other) => {
+                return Err(AppError::Initialization(format!(
+                    "不支持的界面语言设置：{other}"
+                )))
+            }
+            None => None,
+        };
+        let theme = match value("ui_theme")?.as_deref() {
+            Some("light") => Some(UiTheme::Light),
+            Some("dark") => Some(UiTheme::Dark),
+            Some("system") => Some(UiTheme::System),
+            Some(other) => {
+                return Err(AppError::Initialization(format!(
+                    "不支持的界面主题设置：{other}"
+                )))
+            }
+            None => None,
+        };
+        Ok(UiPreferences { locale, theme })
+    }
+
+    /// Atomically persist the complete UI preference pair to avoid split state.
+    pub fn save_ui_preferences(&self, locale: UiLocale, theme: UiTheme) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for (key, value) in [("ui_locale", locale.as_str()), ("ui_theme", theme.as_str())] {
+            transaction.execute(
+                "INSERT INTO app_setting (key, value, update_time)
+                 VALUES (?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                   update_time = CURRENT_TIMESTAMP",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Load the optional native collection proxy without exposing environment state.
+    pub fn network_settings(&self) -> AppResult<NetworkSettings> {
+        let proxy_url = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = 'network_proxy_url'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(NetworkSettings { proxy_url })
+    }
+
+    /// Persist or clear the proxy atomically; proxy credentials are rejected by the command layer.
+    pub fn save_network_settings(&self, proxy_url: Option<&str>) -> AppResult<()> {
+        match proxy_url {
+            Some(value) => self.connection.execute(
+                "INSERT INTO app_setting (key, value, update_time)
+                 VALUES ('network_proxy_url', ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                   update_time = CURRENT_TIMESTAMP",
+                [value],
+            )?,
+            None => self.connection.execute(
+                "DELETE FROM app_setting WHERE key = 'network_proxy_url'",
+                [],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Load model routing while exposing only credential presence to command callers.
     pub fn model_settings(&self) -> AppResult<ModelSettings> {
         let value = |key: &str, fallback: &str| -> AppResult<String> {
             Ok(self
@@ -274,14 +359,20 @@ impl<'connection> TopicRepository<'connection> {
         Ok(ModelSettings {
             endpoint: value("model_endpoint", "https://api.deepseek.com")?,
             model: value("model_name", "deepseek-chat")?,
-            has_api_key: false,
+            has_api_key: self.encrypted_api_key()?.is_some(),
         })
     }
 
-    /// Persist only non-secret routing values; secrets never enter SQLite.
-    pub fn save_model_settings(&self, endpoint: &str, model: &str) -> AppResult<()> {
+    /// Persist routing and an optional key atomically so request configuration cannot be half-saved.
+    pub fn save_model_settings(
+        &self,
+        endpoint: &str,
+        model: &str,
+        api_key: Option<&EncryptedCredential>,
+    ) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
         for (key, value) in [("model_endpoint", endpoint), ("model_name", model)] {
-            self.connection.execute(
+            transaction.execute(
                 "INSERT INTO app_setting (key, value, update_time)
                  VALUES (?, ?, CURRENT_TIMESTAMP)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value,
@@ -289,7 +380,46 @@ impl<'connection> TopicRepository<'connection> {
                 params![key, value],
             )?;
         }
+        if let Some(api_key) = api_key {
+            transaction.execute(
+                "INSERT INTO model_credential
+                   (id, algorithm, nonce, ciphertext, update_time)
+                 VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(id) DO UPDATE SET algorithm = excluded.algorithm,
+                   nonce = excluded.nonce, ciphertext = excluded.ciphertext,
+                   update_time = CURRENT_TIMESTAMP",
+                params![ALGORITHM, api_key.nonce, api_key.ciphertext],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
+    }
+
+    /// Load only encrypted model-key material for later native in-memory decryption.
+    pub fn encrypted_api_key(&self) -> AppResult<Option<EncryptedCredential>> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT algorithm, nonce, ciphertext FROM model_credential WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match row {
+            Some((algorithm, nonce, ciphertext)) if algorithm == ALGORITHM => {
+                Ok(Some(EncryptedCredential { nonce, ciphertext }))
+            }
+            Some((algorithm, _, _)) => Err(AppError::Credential(format!(
+                "不支持的模型凭据加密算法：{algorithm}"
+            ))),
+            None => Ok(None),
+        }
     }
 
     /// Read a current-board title by ID so the WebView cannot inject arbitrary model input.
@@ -562,7 +692,7 @@ impl<'connection> TopicRepository<'connection> {
                  AND p.last_success_run_id = t.last_collection_run_id)
              FROM platform p WHERE p.deleted = 0 ORDER BY p.id",
         )?;
-        let statuses = statement
+        let mut statuses = statement
             .query_map([], |row| {
                 let code: String = row.get(0)?;
                 Ok(PlatformStatusView {
@@ -578,8 +708,22 @@ impl<'connection> TopicRepository<'connection> {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        // Keep healthy sources easiest to reach in both settings and filters.
+        // Within the same connectivity group, a larger current board is more
+        // useful; Rust's stable sort preserves catalog order for exact ties.
+        statuses.sort_by(|left, right| {
+            source_connectivity_rank(left.status.as_deref())
+                .cmp(&source_connectivity_rank(right.status.as_deref()))
+                .then_with(|| right.topic_count.cmp(&left.topic_count))
+        });
         Ok(statuses)
     }
+}
+
+/// A completed successful collection is the only positive connectivity proof;
+/// unknown, running and failed states stay in the secondary group.
+fn source_connectivity_rank(status: Option<&str>) -> u8 {
+    u8::from(status != Some("succeeded"))
 }
 
 /// Repair titles irreversibly damaged by the early C114 UTF-8 decoder without rewriting valid first-seen text.
@@ -606,6 +750,61 @@ mod tests {
             )
             .expect("platform should insert");
         connection
+    }
+
+    #[test]
+    fn source_statuses_put_reachable_and_larger_boards_first() {
+        let connection = fixture();
+        for (code, name) in [
+            ("sspai", "少数派"),
+            ("hackernews", "Hacker News"),
+            ("ithome", "IT之家"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO platform (code, display_name, home_url, feed_url)
+                     VALUES (?, ?, 'https://example.com/', 'https://example.com/feed')",
+                    params![code, name],
+                )
+                .expect("platform should insert");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO collection_run (platform_id, status, trigger_kind, scheduled_time, start_time, end_time)
+                 SELECT id, 'succeeded', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM platform WHERE code = 'qbitai';
+                 INSERT INTO collection_run (platform_id, status, trigger_kind, scheduled_time, start_time, end_time)
+                 SELECT id, 'succeeded', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM platform WHERE code = 'sspai';
+                 INSERT INTO collection_run (platform_id, status, trigger_kind, scheduled_time, start_time, end_time)
+                 SELECT id, 'failed', 'manual', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM platform WHERE code = 'hackernews';",
+            )
+            .expect("runs should insert");
+
+        let repository = TopicRepository::new(&connection);
+        let mut statuses = repository.statuses().expect("statuses should load");
+        // Supply representative board sizes directly so this unit test focuses
+        // on the ordering contract rather than feed-commit mechanics.
+        for status in &mut statuses {
+            status.topic_count = match status.code.as_str() {
+                "sspai" => 30,
+                "qbitai" => 10,
+                "hackernews" => 100,
+                "ithome" => 50,
+                _ => 0,
+            };
+        }
+        statuses.sort_by(|left, right| {
+            source_connectivity_rank(left.status.as_deref())
+                .cmp(&source_connectivity_rank(right.status.as_deref()))
+                .then_with(|| right.topic_count.cmp(&left.topic_count))
+        });
+
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sspai", "qbitai", "hackernews", "ithome"]
+        );
     }
 
     /// Feed commits must populate current topics, observations and run counters together.
@@ -660,6 +859,92 @@ mod tests {
             })
             .expect("empty filter should be valid");
         assert_eq!(page.total, 0);
+    }
+
+    /// Model credentials stay in their dedicated table and only presence reaches settings views.
+    #[test]
+    fn saves_and_reads_model_credential() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+
+        let encrypted = EncryptedCredential {
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 32],
+        };
+        repository
+            .save_model_settings("https://api.example.com", "example-model", Some(&encrypted))
+            .expect("model settings should save");
+
+        let settings = repository
+            .model_settings()
+            .expect("model settings should load");
+        assert_eq!(settings.endpoint, "https://api.example.com");
+        assert_eq!(settings.model, "example-model");
+        assert!(settings.has_api_key);
+        assert_eq!(
+            repository
+                .encrypted_api_key()
+                .expect("encrypted API key should load")
+                .expect("encrypted API key should exist")
+                .ciphertext,
+            encrypted.ciphertext
+        );
+    }
+
+    /// UI choices persist in SQLite because the main WebView intentionally has no durable store.
+    #[test]
+    fn saves_and_reads_ui_preferences() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+
+        assert_eq!(
+            repository
+                .ui_preferences()
+                .expect("empty preferences should load"),
+            UiPreferences {
+                locale: None,
+                theme: None,
+            }
+        );
+        repository
+            .save_ui_preferences(UiLocale::En, UiTheme::Dark)
+            .expect("UI preferences should save");
+        assert_eq!(
+            repository
+                .ui_preferences()
+                .expect("saved preferences should load"),
+            UiPreferences {
+                locale: Some(UiLocale::En),
+                theme: Some(UiTheme::Dark),
+            }
+        );
+    }
+
+    #[test]
+    fn saves_and_clears_network_proxy() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+
+        assert_eq!(
+            repository.network_settings().expect("settings should load"),
+            NetworkSettings { proxy_url: None }
+        );
+        repository
+            .save_network_settings(Some("http://127.0.0.1:7897"))
+            .expect("proxy should save");
+        assert_eq!(
+            repository.network_settings().expect("settings should load"),
+            NetworkSettings {
+                proxy_url: Some("http://127.0.0.1:7897".into())
+            }
+        );
+        repository
+            .save_network_settings(None)
+            .expect("proxy should clear");
+        assert_eq!(
+            repository.network_settings().expect("settings should load"),
+            NetworkSettings { proxy_url: None }
+        );
     }
 
     /// Only a clean C114 recollection may replace a legacy title containing decoding loss.

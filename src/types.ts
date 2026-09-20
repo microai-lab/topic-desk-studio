@@ -69,18 +69,40 @@ export interface RefreshResult {
   readonly insertedTopicIds: number[]
 }
 
-/** Non-secret model routing returned by Rust; API key contents never cross back into the WebView. */
+/** Model routing returned by Rust; API key contents never cross back into the WebView. */
 export interface ModelSettings {
   readonly endpoint: string
   readonly model: string
   readonly hasApiKey: boolean
 }
 
-/** Settings update; an empty API key keeps the credential already stored by the operating system. */
+/** Settings update; an empty API key keeps the credential already stored in SQLite. */
 export interface SaveModelSettings {
   readonly endpoint: string
   readonly model: string
   readonly apiKey?: string
+}
+
+/** UI preferences persisted by Rust because the main WebView uses temporary storage. */
+export interface UiPreferences {
+  readonly locale: 'zh' | 'en' | null
+  readonly theme: 'light' | 'dark' | 'system' | null
+}
+
+/** Complete validated UI preference update sent through the native boundary. */
+export interface SaveUiPreferences {
+  readonly locale: 'zh' | 'en'
+  readonly theme: 'light' | 'dark' | 'system'
+}
+
+/** Native collection proxy; null means direct network access. */
+export interface NetworkSettings {
+  readonly proxyUrl: string | null
+}
+
+/** A blank value clears the explicitly configured collection proxy. */
+export interface SaveNetworkSettings {
+  readonly proxyUrl: string
 }
 
 /** One on-demand title translation. */

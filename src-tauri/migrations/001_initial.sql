@@ -75,10 +75,21 @@ CREATE TABLE creation_queue (
   UNIQUE (topic_id)
 );
 
--- Non-secret application settings; API keys are stored in the operating-system credential vault.
+-- Non-secret application settings are kept separate from model credentials.
 CREATE TABLE app_setting (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
+  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- The single configured model credential stays in the local application database.
+-- Rust never returns this value to the WebView.
+CREATE TABLE model_credential (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  algorithm TEXT NOT NULL CHECK (algorithm = 'AES-256-GCM-file-v1'),
+  nonce BLOB NOT NULL CHECK (length(nonce) = 12),
+  ciphertext BLOB NOT NULL CHECK (length(ciphertext) > 16),
+  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -92,4 +103,4 @@ CREATE INDEX idx_observation_topic_time ON topic_observation (topic_id, create_t
 CREATE INDEX idx_observation_create_time ON topic_observation (create_time, id);
 CREATE INDEX idx_creation_queue_active_time ON creation_queue (deleted, create_time DESC, id DESC);
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 6;

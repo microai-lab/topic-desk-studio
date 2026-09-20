@@ -1,6 +1,7 @@
 //! Network collection, protocol parsing and bounded cross-platform coordination.
 
 use std::collections::{HashSet, VecDeque};
+use std::error::Error as _;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -34,30 +35,61 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
     }
 
     let mut jobs = VecDeque::new();
-    for platform in platforms {
+    for platform in platforms
+        .into_iter()
+        // Xiaohongshu's signed feed is collected explicitly from the user's
+        // ephemeral logged-in browser session, never by replaying credentials.
+        .filter(|platform| platform.code != "xiaohongshu")
+    {
         let run_id = repository.create_run(platform.id, trigger)?;
         jobs.push_back((platform, run_id));
     }
+    let job_count = jobs.len();
+    if job_count == 0 {
+        return Err(AppError::Collection("没有可自动采集的数据来源".into()));
+    }
 
-    let client = Client::builder()
+    let network_settings = repository.network_settings()?;
+    let direct_client = Client::builder()
         .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
         .redirect(reqwest::redirect::Policy::limited(8))
+        .no_proxy()
         .build()
         .map_err(collection_error)?;
+    let proxy_client = network_settings
+        .proxy_url
+        .map(|proxy_url| {
+            let proxy = reqwest::Proxy::all(&proxy_url)
+                .map_err(|error| AppError::Collection(format!("代理配置无效：{error}")))?;
+            Client::builder()
+                .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+                .redirect(reqwest::redirect::Policy::limited(8))
+                .proxy(proxy)
+                .build()
+                .map_err(collection_error)
+        })
+        .transpose()?;
     let jobs = Arc::new(Mutex::new(jobs));
     let (sender, receiver) = mpsc::channel();
-    let worker_count = MAX_WORKERS.min(repository.enabled_platforms()?.len());
+    let worker_count = MAX_WORKERS.min(job_count);
 
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
             let jobs = Arc::clone(&jobs);
             let sender = sender.clone();
-            let client = client.clone();
+            let direct_client = direct_client.clone();
+            let proxy_client = proxy_client.clone();
             scope.spawn(move || loop {
                 let job = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
                 let Some((platform, run_id)) = job else { break };
-                let result = fetch_source(&client, &platform);
+                let client = if source_requires_proxy(&platform.code) {
+                    proxy_client.as_ref().unwrap_or(&direct_client)
+                } else {
+                    &direct_client
+                };
+                let result = fetch_source(client, &platform);
                 if sender.send((platform, run_id, result)).is_err() {
                     break;
                 }
@@ -88,6 +120,29 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
     })
 }
 
+/// Route only sources proven unreliable on direct mainland connections through
+/// the explicit proxy; all others keep their original geographic response.
+fn source_requires_proxy(code: &str) -> bool {
+    matches!(
+        code,
+        "binance-square-zh"
+            | "binance-square-global"
+            | "mastodon-zh"
+            | "mastodon-global"
+            | "coingecko"
+            | "github"
+            | "google-trends-zh"
+            | "google-trends-global"
+            | "hugging-face"
+            | "bluesky"
+            | "polymarket"
+            | "bbc-chinese"
+            | "dw-chinese"
+            | "rfi-chinese"
+            | "bloomberg"
+    )
+}
+
 /// Fetch one source with known fallbacks and reject an apparently successful empty parse.
 fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
     let mut endpoints = vec![platform.endpoint_url.as_str()];
@@ -99,11 +154,22 @@ fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedF
     }
     let mut failures = Vec::new();
     for endpoint in endpoints {
-        match fetch_endpoint(client, platform, endpoint) {
-            Ok(feed) if !feed.topics.is_empty() => return Ok(feed),
-            Ok(_) => failures.push(format!("{} 未解析到有效热点", platform.code)),
-            Err(AppError::Collection(message)) => failures.push(message),
-            Err(error) => failures.push(error.to_string()),
+        for empty_attempt in 0..2 {
+            match fetch_endpoint(client, platform, endpoint) {
+                Ok(feed) if !feed.topics.is_empty() => return Ok(feed),
+                Ok(_) if empty_attempt == 0 && endpoint.contains("news.orz.ai") => {
+                    // The aggregator briefly publishes an empty list while
+                    // rotating its cache; retry once before declaring failure.
+                    std::thread::sleep(Duration::from_millis(800));
+                    continue;
+                }
+                Ok(_) if platform.code == "xiaohongshu" => failures
+                    .push("xiaohongshu 页面已改为动态签名加载，公开 HTML 不含热点数据".into()),
+                Ok(_) => failures.push(format!("{} 未解析到有效热点", platform.code)),
+                Err(AppError::Collection(message)) => failures.push(message),
+                Err(error) => failures.push(error.to_string()),
+            }
+            break;
         }
     }
     Err(AppError::Collection(failures.join("；")))
@@ -186,12 +252,60 @@ fn request(client: &Client, code: &str, endpoint: &str) -> AppResult<Response> {
         headers.insert("x-app-id", HeaderValue::from_static("bVBF4FyRTn5NJF5n"));
         headers.insert("x-version", HeaderValue::from_static("1.0.0"));
     }
-    let response = client
-        .get(endpoint)
-        .headers(headers)
-        .send()
-        .map_err(collection_error)?;
-    response.error_for_status().map_err(collection_error)
+    let mut response = None;
+    for attempt in 0..2 {
+        match client.get(endpoint).headers(headers.clone()).send() {
+            Ok(value) => {
+                response = Some(value);
+                break;
+            }
+            Err(error) if attempt == 0 && (error.is_timeout() || error.is_connect()) => continue,
+            Err(error) => return Err(request_error(code, endpoint, error)),
+        }
+    }
+    let response = response
+        .ok_or_else(|| AppError::Collection(format!("{code}：有限重试后仍未获得网络响应")))?;
+    response
+        .error_for_status()
+        .map_err(|error| request_error(code, endpoint, error))
+}
+
+/// Reduce reqwest's nested transport errors to actionable, non-sensitive diagnostics.
+fn request_error(code: &str, endpoint: &str, error: reqwest::Error) -> AppError {
+    let host = Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "未知地址".into());
+    let mut chain = error.to_string().to_ascii_lowercase();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push(' ');
+        chain.push_str(&cause.to_string().to_ascii_lowercase());
+        source = cause.source();
+    }
+    let detail = if let Some(status) = error.status() {
+        format!("HTTP {status}")
+    } else if error.is_timeout() {
+        "连接或读取超时".into()
+    } else if chain.contains("dns")
+        || chain.contains("failed to lookup address")
+        || chain.contains("name or service not known")
+    {
+        "DNS 解析失败".into()
+    } else if chain.contains("connection refused") {
+        "连接被拒绝".into()
+    } else if chain.contains("connection reset") || chain.contains("reset by peer") {
+        "连接被远端重置".into()
+    } else if chain.contains("certificate") || chain.contains("tls") {
+        "TLS 安全连接失败".into()
+    } else if error.is_connect() {
+        "无法建立网络连接".into()
+    } else if error.is_redirect() {
+        "重定向次数过多或地址无效".into()
+    } else {
+        "网络请求失败".into()
+    };
+    AppError::Collection(format!("{code} · {host}：{detail}"))
 }
 
 /// Parse RSS, Atom and RDF feeds using a tolerant standards-aware parser.
@@ -520,6 +634,14 @@ fn parse_xiaohongshu(code: &str, html: String) -> AppResult<ParsedFeed> {
             break;
         }
     }
+    if topics.is_empty()
+        && html.contains("window.__INITIAL_STATE__")
+        && html.contains(r#"\"feeds\":[]"#)
+    {
+        return Err(AppError::Collection(
+            "xiaohongshu 页面已改为动态签名加载，公开 HTML 不含热点数据".into(),
+        ));
+    }
     Ok(ParsedFeed {
         fetched_count: topics.len() as u32,
         invalid_count: 0,
@@ -797,6 +919,33 @@ mod tests {
     #[test]
     fn strips_html_from_titles() {
         assert_eq!(plain_text("<b>Hello</b> &amp; world"), "Hello & world");
+    }
+
+    #[test]
+    fn explains_xiaohongshu_dynamic_empty_shell() {
+        let error = parse_xiaohongshu(
+            "xiaohongshu",
+            r#"<script>window.__INITIAL_STATE__={\"feed\":{\"feeds\":[]}}</script>"#.into(),
+        )
+        .expect_err("empty signed shell must not look like a valid empty board");
+        assert!(error.to_string().contains("动态签名加载"));
+    }
+
+    #[test]
+    fn proxies_only_sources_that_need_non_direct_routes() {
+        for code in [
+            "coingecko",
+            "github",
+            "google-trends-zh",
+            "hugging-face",
+            "bbc-chinese",
+            "binance-square-global",
+        ] {
+            assert!(source_requires_proxy(code), "{code} should use the proxy");
+        }
+        for code in ["36kr", "weibo", "baidu", "zhihu", "arxiv"] {
+            assert!(!source_requires_proxy(code), "{code} should stay direct");
+        }
     }
 
     /// Legacy Chinese pages commonly advertise GB2312 only in a meta tag.

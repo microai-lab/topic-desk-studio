@@ -1,7 +1,6 @@
 //! Typed browser chrome actions; every native/profile operation requires the main webview.
 
 use crate::browser_profile::{self, BrowserProfile, BrowserSettings};
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{webview::Cookie, Manager};
@@ -36,28 +35,14 @@ pub enum BrowserAction {
     Clear {
         history: bool,
         cookies: bool,
-        passwords: bool,
         downloads: bool,
     },
     ImportCookies {
         content: String,
     },
-    ImportPasswords {
-        content: String,
-    },
-    FillPassword {
-        id: i64,
-    },
-    DeletePassword {
-        id: i64,
-    },
     RevealDownload {
         id: i64,
     },
-}
-
-fn vault(id: i64) -> Result<keyring::Entry, String> {
-    keyring::Entry::new("Topic Desk Browser", &format!("login-{id}")).map_err(|e| e.to_string())
 }
 
 fn eval(view: &tauri::Webview, script: String) -> Result<Value, String> {
@@ -70,70 +55,6 @@ fn eval(view: &tauri::Webview, script: String) -> Result<Value, String> {
         .recv_timeout(std::time::Duration::from_secs(10))
         .map_err(|_| "页面暂时未响应，请重试")?;
     serde_json::from_str(&raw).map_err(|_| "页面返回无效结果".into())
-}
-
-/// Validate imported credentials before saving values only in the operating-system vault.
-#[derive(Deserialize)]
-struct ImportedPassword {
-    url: String,
-    username: String,
-    password: String,
-}
-
-/// CSV parser accepts browser exports with quoted commas, embedded newlines and escaped quotes.
-fn password_rows(content: &str) -> Result<Vec<ImportedPassword>, String> {
-    if content.trim_start().starts_with('[') {
-        return serde_json::from_str(content).map_err(|e| format!("JSON 格式无效：{e}"));
-    }
-    let mut rows = Vec::<Vec<String>>::new();
-    let mut row = vec![];
-    let mut field = String::new();
-    let mut chars = content.trim_start_matches('\u{feff}').chars().peekable();
-    let mut quoted = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                field.push('"');
-                chars.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                row.push(std::mem::take(&mut field));
-            }
-            '\n' if !quoted => {
-                row.push(std::mem::take(&mut field));
-                rows.push(std::mem::take(&mut row));
-            }
-            '\r' if !quoted => {}
-            _ => field.push(c),
-        }
-    }
-    if quoted {
-        return Err("CSV 引号未闭合".into());
-    }
-    row.push(field);
-    if row.iter().any(|cell| !cell.is_empty()) {
-        rows.push(row);
-    }
-    let header = rows.first().ok_or("没有可导入的数据")?;
-    let column = |name: &str| {
-        header
-            .iter()
-            .position(|v| v.trim().eq_ignore_ascii_case(name))
-            .ok_or_else(|| format!("缺少 {name} 列"))
-    };
-    let (url, username, password) = (column("url")?, column("username")?, column("password")?);
-    rows.iter()
-        .skip(1)
-        .filter(|r| r.iter().any(|c| !c.is_empty()))
-        .map(|row| {
-            Ok(ImportedPassword {
-                url: row.get(url).ok_or("CSV 行缺少网址")?.clone(),
-                username: row.get(username).ok_or("CSV 行缺少用户名")?.clone(),
-                password: row.get(password).ok_or("CSV 行缺少密码")?.clone(),
-            })
-        })
-        .collect()
 }
 
 /// Execute only from the privileged main view and outside the native event-loop thread.
@@ -268,7 +189,6 @@ pub async fn browser_control(
         BrowserAction::Clear {
             history,
             cookies,
-            passwords,
             downloads,
         } => {
             if cookies {
@@ -277,29 +197,9 @@ pub async fn browser_control(
                     .map_err(|e| e.to_string())?;
             }
             let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
-            if passwords {
-                let ids = session
-                    .database
-                    .prepare("SELECT id FROM records WHERE kind='password'")
-                    .map_err(|e| e.to_string())?
-                    .query_map([], |r| r.get::<_, i64>(0))
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                for id in ids {
-                    match vault(id)?.delete_credential() {
-                        Ok(()) | Err(keyring::Error::NoEntry) => (),
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-            }
             // Clear selected metadata atomically; downloads themselves are retained.
             let tx = session.database.transaction().map_err(|e| e.to_string())?;
-            for (selected, kind) in [
-                (history, "history"),
-                (passwords, "password"),
-                (downloads, "download"),
-            ] {
+            for (selected, kind) in [(history, "history"), (downloads, "download")] {
                 if selected {
                     tx.execute("DELETE FROM records WHERE kind=?1", [kind])
                         .map_err(|e| e.to_string())?;
@@ -353,99 +253,6 @@ pub async fn browser_control(
             }
             Ok(json!({"count":values.len()}))
         }
-        BrowserAction::ImportPasswords { content } => {
-            if content.len() > 2_000_000 {
-                return Err("导入内容不能超过 2 MB".into());
-            }
-            let values = password_rows(&content)?;
-            if values.len() > 1000 {
-                return Err("一次最多导入 1000 个登录信息".into());
-            }
-            let validated = values
-                .into_iter()
-                .map(|value| {
-                    let url = url::Url::parse(&value.url).map_err(|_| "密码条目的网址无效")?;
-                    if !matches!(url.scheme(), "http" | "https")
-                        || url.host_str().is_none()
-                        || value.password.is_empty()
-                        || value.password.len() > 16384
-                        || value.username.len() > 1000
-                    {
-                        return Err("密码条目无效".into());
-                    }
-                    Ok((url.origin().ascii_serialization(), value))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let session = profile.inner.lock().map_err(|e| e.to_string())?;
-            let mut saved = 0;
-            for (origin, value) in validated {
-                session.database.execute("INSERT INTO records(kind,url,title,detail,time) VALUES('password',?1,?2,'',?3)",params![origin,value.username,browser_profile::now()]).map_err(|e|e.to_string())?;
-                let id = session.database.last_insert_rowid();
-                if let Err(error) = vault(id)?.set_password(&value.password) {
-                    let _ = session
-                        .database
-                        .execute("DELETE FROM records WHERE id=?1", [id]);
-                    return Err(format!(
-                        "已导入 {saved} 项，系统钥匙串拒绝其余写入：{error}"
-                    ));
-                }
-                saved += 1;
-            }
-            Ok(json!({"count":saved}))
-        }
-        BrowserAction::FillPassword { id } => {
-            let (origin, username): (String, String) = profile
-                .inner
-                .lock()
-                .map_err(|e| e.to_string())?
-                .database
-                .query_row(
-                    "SELECT url,title FROM records WHERE kind='password' AND id=?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(|_| "登录信息不存在")?;
-            let view = view()?;
-            if view
-                .url()
-                .map_err(|e| e.to_string())?
-                .origin()
-                .ascii_serialization()
-                != origin
-            {
-                return Err("只能在保存密码的同一网站填充".into());
-            }
-            let password = vault(id)?.get_password().map_err(|e| e.to_string())?;
-            // Recheck origin inside the page too, closing a navigation race. Fill
-            // only the top document and never submit the form automatically.
-            let result = eval(
-                &view,
-                format!(
-                    r#"(() => {{ if(location.origin!=={}) return false; const p=[...document.querySelectorAll('input[type=password]')].find(e=>e.getClientRects().length&&!e.disabled); if(!p)return false; const f=p.form||document;const u=[...f.querySelectorAll('input[type=email],input[autocomplete=username],input[type=text]')].find(e=>e.getClientRects().length&&!e.disabled);const set=(e,v)=>{{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,v);e.dispatchEvent(new Event('input',{{bubbles:true}}));e.dispatchEvent(new Event('change',{{bubbles:true}}));}};if(u)set(u,{});set(p,{});return true; }})()"#,
-                    json!(origin),
-                    json!(username),
-                    json!(password)
-                ),
-            )?;
-            if result != json!(true) {
-                return Err("当前页面没有可填充的登录表单".into());
-            }
-            Ok(Value::Null)
-        }
-        BrowserAction::DeletePassword { id } => {
-            match vault(id)?.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => (),
-                Err(e) => return Err(e.to_string()),
-            }
-            profile
-                .inner
-                .lock()
-                .map_err(|e| e.to_string())?
-                .database
-                .execute("DELETE FROM records WHERE kind='password' AND id=?1", [id])
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
         BrowserAction::RevealDownload { id } => {
             let detail: String = profile
                 .inner
@@ -464,21 +271,5 @@ pub async fn browser_control(
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn imports_quoted_csv_without_truncating_passwords() {
-        let rows = password_rows(
-            "name,url,username,password\r\nExample,https://example.com,\"a,b\",\"x\"\"y\nZ\"\r\n",
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].username, "a,b");
-        assert_eq!(rows[0].password, "x\"y\nZ");
-        assert!(password_rows("url,username,password\n\"bad").is_err());
     }
 }
