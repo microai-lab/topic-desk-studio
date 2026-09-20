@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 encoding_rs = "0.8"
 feed-rs = "2"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
@@ -22,10 +23,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
 thiserror = "2"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", default-features = false, features = ["formatting"] }
 unicode-normalization = "0.1"
 url = "2"
 
@@ -35,3 +36,10 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage", "NSImageRep", "NSBitmapImageRep"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSError"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
+block2 = "0.6"

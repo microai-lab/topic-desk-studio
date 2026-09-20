@@ -32,7 +32,7 @@ Topic Desk Studio 是 [`dsh-topic-desk`](https://github.com/microai-lab/dsh-topi
 - **来源管理与健康状态：**来源可独立启停，并展示最近错误信息。
 - **可选标题翻译：**兼容 OpenAI Chat Completions 接口。
 - **隐私优先：**话题和创作队列保存在本机，API Key 进入操作系统凭据库。
-- **安全打开链接：**原文始终交给系统浏览器，不在应用 WebView 中加载第三方页面。
+- **安全打开链接：**点击右上角浏览器按钮即可显示或隐藏浏览器，原文以标签页形式在隔离的右侧浏览器中打开；仅允许 HTTP(S) 导航，外部页面不授予主界面 WebView 权限。
 
 ## 使用场景
 

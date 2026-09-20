@@ -32,7 +32,7 @@ Topic Desk Studio is a standalone desktop edition of [`dsh-topic-desk`](https://
 - **Source controls and health** with individual enable/disable switches and recent error details.
 - **Optional title translation** through any OpenAI-compatible chat-completions endpoint.
 - **Private by design:** topics and queues stay on the device, while API keys live in the operating system credential vault.
-- **Safe link handling:** original articles always open in the system browser, never inside the application WebView.
+- **Safe link handling:** the top-right browser button directly shows or hides the isolated browser side panel, where original articles open as tabs. Only HTTP(S) navigation is allowed; remote pages receive no main-webview capabilities.
 
 ## Screens and workflows
 

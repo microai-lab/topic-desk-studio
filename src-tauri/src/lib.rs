@@ -1,9 +1,12 @@
 //! Topic Desk Studio native application composition and lifecycle setup.
 
+mod browser_control;
+mod browser_profile;
 mod catalog;
 mod collector;
 mod commands;
 mod database;
+mod desktop;
 mod error;
 mod identity;
 mod models;
@@ -11,8 +14,8 @@ mod repository;
 mod translator;
 
 use commands::{
-    get_model_settings, list_topics, refresh_topics, save_model_settings, set_platform_enabled,
-    set_topic_queued, translate_topic, AppState,
+    browser_request, get_model_settings, list_topics, refresh_topics, save_model_settings,
+    set_platform_enabled, set_topic_queued, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,6 +32,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("无法解析应用数据目录：{error}"))?;
+            app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
                 database::open_database(&database_path).map_err(|error| error.to_string())?;
@@ -67,7 +71,9 @@ pub fn run() {
             save_model_settings,
             set_platform_enabled,
             set_topic_queued,
-            translate_topic
+            translate_topic,
+            browser_request,
+            browser_control::browser_control
         ])
         .run(tauri::generate_context!())
         .expect("Topic Desk Studio failed to start");

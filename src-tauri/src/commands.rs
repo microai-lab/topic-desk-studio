@@ -159,3 +159,19 @@ pub async fn refresh_topics(state: State<'_, AppState>) -> Result<RefreshResult,
         inserted_topic_ids: result.inserted_topic_ids,
     })
 }
+
+/// Route trusted UI browser requests asynchronously to avoid Windows UI deadlocks.
+#[tauri::command]
+pub async fn browser_request(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    action: String,
+    tab_id: Option<String>,
+    url: Option<String>,
+    bounds: Option<crate::desktop::BrowserBounds>,
+) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("无权操作浏览区域".into());
+    }
+    crate::desktop::browser_request(&app, &action, tab_id, url, bounds)
+}

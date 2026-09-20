@@ -1,9 +1,11 @@
 /** Topic Desk Studio — main UI component. */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  getModelSettings, listTopics, openExternalUrl, refreshTopics, saveModelSettings,
+  browserRequest, getModelSettings, listTopics, refreshTopics, saveModelSettings,
   setPlatformEnabled, setTopicQueued, translateTopic,
 } from './api'
+import { BrowserPane } from './BrowserPane'
+import type { BrowserTab } from './BrowserPane'
 import { isEnglishTitle, rankTrendPoints } from './presentation'
 import {
   Locale, Theme, Messages, messages,
@@ -33,15 +35,16 @@ function RankTrend({ values, label }: { readonly values: number[]; readonly labe
   )
 }
 
-function TopicCard({ topic, translation, m, onQueueChange, onTranslate }: {
+function TopicCard({ topic, translation, m, onQueueChange, onTranslate, onOpen, selected }: {
   readonly topic: TopicView
+  readonly onOpen: (topic: TopicView) => void
+  readonly selected: boolean
   readonly translation?: TranslationState
   readonly m: Messages
   readonly onQueueChange: (topic: TopicView, queued: boolean) => Promise<void>
   readonly onTranslate: (topic: TopicView) => Promise<void>
 }) {
   const [saving, setSaving] = useState(false)
-
   const toggleQueue = async (): Promise<void> => {
     setSaving(true)
     try { await onQueueChange(topic, !topic.queued) }
@@ -49,7 +52,7 @@ function TopicCard({ topic, translation, m, onQueueChange, onTranslate }: {
   }
 
   return (
-    <article className="topic-card">
+    <article className={`topic-card${selected ? ' topic-selected' : ''}`}>
       <div className="topic-rank" aria-label={`${m.rankLabel} ${topic.rank}`}>
         <span>{topic.rank}</span>
         <small>{m.rankLabel}</small>
@@ -64,7 +67,7 @@ function TopicCard({ topic, translation, m, onQueueChange, onTranslate }: {
             </span>
           ) : null}
         </div>
-        <button className="topic-title" type="button" onClick={() => void openExternalUrl(topic.url)}>
+        <button className="topic-title" type="button" onClick={() => onOpen(topic)}>
           {topic.title}
         </button>
         {isEnglishTitle(topic.title) ? (
@@ -92,7 +95,9 @@ function TopicCard({ topic, translation, m, onQueueChange, onTranslate }: {
   )
 }
 
+/** Compose topic discovery, settings and the optional native article pane. */
 export function App() {
+  useEffect(() => { void browserRequest('closeAll').catch(() => {}) }, [])
   // ── Locale & theme ──────────────────────────────────────────────
   const [locale, setLocale] = useState<Locale>(detectLocale)
   const [theme, setTheme]   = useState<Theme>(detectTheme)
@@ -107,6 +112,14 @@ export function App() {
   }, [locale])
 
   // ── View state ──────────────────────────────────────────────────
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserClosing, setBrowserClosing] = useState(false)
+  const browserCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([])
+  const [activeBrowserTabId, setActiveBrowserTabId] = useState('')
+  const browserTabCounter = useRef(0)
+  const [readerExpanded, setReaderExpanded] = useState(false)
+  const [readerWidth, setReaderWidth] = useState(60)
   const [view, setView]           = useState<ViewMode>('discover')
   const [prevView, setPrevView]   = useState<Exclude<ViewMode, 'settings'>>('discover')
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
@@ -134,6 +147,78 @@ export function App() {
   const [modelName,       setModelName]          = useState('deepseek-chat')
   const [apiKey,          setApiKey]             = useState('')
   const [savingSettings,  setSavingSettings]     = useState(false)
+
+  /** Browser tabs live above the panel so hiding it does not discard the session. */
+  const addBrowserTab = useCallback((tab?: Omit<BrowserTab, 'id'>): void => {
+    const id = `tab-${++browserTabCounter.current}`
+    setBrowserTabs((current) => [...current, {
+      id,
+      url: tab?.url ?? '',
+      title: tab?.title ?? '',
+      ...(tab?.topicId === undefined ? {} : { topicId: tab.topicId }),
+    }])
+    setActiveBrowserTabId(id)
+    setBrowserOpen(true)
+    setBrowserClosing(false)
+    if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
+  }, [])
+
+  const closeBrowser = useCallback((): void => {
+    if (browserCloseTimer.current) clearTimeout(browserCloseTimer.current)
+    setBrowserClosing(true)
+    setBrowserOpen(false)
+    browserCloseTimer.current = setTimeout(() => {
+      setBrowserClosing(false)
+      setReaderExpanded(false)
+      browserCloseTimer.current = null
+    }, 280)
+  }, [])
+
+  /** The top-right control directly toggles the browser while retaining its tabs. */
+  const toggleBrowser = useCallback((): void => {
+    if (browserOpen) {
+      closeBrowser()
+      return
+    }
+    if (browserTabs.length === 0) addBrowserTab()
+    else {
+      setBrowserOpen(true)
+      setBrowserClosing(false)
+      if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
+      if (!activeBrowserTabId && browserTabs[0]) setActiveBrowserTabId(browserTabs[0].id)
+    }
+  }, [activeBrowserTabId, addBrowserTab, browserOpen, browserTabs, closeBrowser])
+
+  const openTopic = useCallback((topic: TopicView): void => {
+    addBrowserTab({ url: topic.url, title: topic.title, topicId: topic.id })
+  }, [addBrowserTab])
+
+  const updateBrowserTab = useCallback((id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>): void => {
+    setBrowserTabs((current) => current.map((tab) => tab.id === id ? { ...tab, ...update } : tab))
+  }, [])
+
+  const closeBrowserTab = useCallback((id: string): void => {
+    setBrowserTabs((current) => {
+      const index = current.findIndex((tab) => tab.id === id)
+      const next = current.filter((tab) => tab.id !== id)
+      setActiveBrowserTabId((active) => active === id
+        ? (next[Math.min(Math.max(index, 0), next.length - 1)]?.id ?? '')
+        : active)
+      if (next.length === 0) setBrowserOpen(false)
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    const openTab = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 't') {
+        event.preventDefault()
+        addBrowserTab()
+      }
+    }
+    window.addEventListener('keydown', openTab)
+    return () => window.removeEventListener('keydown', openTab)
+  }, [addBrowserTab])
 
   // ── Query ────────────────────────────────────────────────────────
   const query = useMemo<TopicQuery>(() => ({
@@ -387,12 +472,16 @@ export function App() {
         </div>
       </aside>
 
-      <main>
+      <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) && !readerExpanded ? `minmax(320px, ${100 - readerWidth}fr) minmax(0, ${readerWidth}fr)` : undefined }}>
+      <main className="topic-list-pane">
         <header className="topbar">
           <h1>{viewTitle}</h1>
-          <button className="primary-button" type="button" disabled={refreshing} onClick={() => void collect()}>
-            {refreshing ? m.btnRefreshing : m.btnRefresh}
-          </button>
+          <div className="topbar-actions">
+            <button className="primary-button" type="button" disabled={refreshing} onClick={() => void collect()}>
+              {refreshing ? m.btnRefreshing : m.btnRefresh}
+            </button>
+            <button className={`side-panel-toggle${browserOpen ? ' active' : ''}`} type="button" aria-pressed={browserOpen} title={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} onClick={toggleBrowser}><span aria-hidden="true">◧</span></button>
+          </div>
         </header>
 
         <section className="filters" aria-label={m.filterSearch}>
@@ -457,6 +546,7 @@ export function App() {
               key={topic.id} topic={topic} m={m}
               {...(translations[topic.id] === undefined ? {} : { translation: translations[topic.id] })}
               onQueueChange={changeQueue} onTranslate={translate}
+              onOpen={openTopic} selected={browserTabs.find((tab) => tab.id === activeBrowserTabId)?.topicId === topic.id}
             />
           )) : null}
         </section>
@@ -467,6 +557,12 @@ export function App() {
           <button disabled={pageIndex + 1 >= totalPages} onClick={() => setPageIndex((v) => v + 1)}>{m.next}</button>
         </footer>
       </main>
+      {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing}
+        onActivate={setActiveBrowserTabId} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
+        onExpand={() => setReaderExpanded((value) => !value)}
+        onClose={closeBrowser}
+        onResize={setReaderWidth} /> : null}
+      </div>
     </div>
   )
 }
