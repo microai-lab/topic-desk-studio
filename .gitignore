@@ -161,3 +161,6 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Claude Code session data.
+.claude/
