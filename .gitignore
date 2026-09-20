@@ -164,3 +164,6 @@ data/
 
 # Claude Code session data.
 .claude/
+
+# Generated Understand Anything knowledge graphs.
+.understand-anything/
