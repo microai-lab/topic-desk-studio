@@ -52,7 +52,7 @@ Topic Desk Studio is a standalone desktop edition of [`dsh-topic-desk`](https://
 The published macOS builds are not yet signed or notarized, so Gatekeeper blocks downloaded copies with a misleading "damaged" message. The app is intact; clear the quarantine attribute once after installing:
 
 ```bash
-xattr -d com.apple.quarantine "/Applications/Topic Desk Studio.app"
+xattr -d com.apple.quarantine "/Applications/Topic\ Desk\ Studio.app"
 ```
 
 ## Translation and credential storage

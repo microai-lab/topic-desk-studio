@@ -52,7 +52,7 @@ Topic Desk Studio 是 [`dsh-topic-desk`](https://github.com/microai-lab/dsh-topi
 当前发布的 macOS 安装包尚未签名和公证，Gatekeeper 会拦截从网络下载的副本并误报"已损坏"。应用本身是完好的，安装后执行一次以下命令清除隔离属性即可：
 
 ```bash
-xattr -d com.apple.quarantine "/Applications/Topic Desk Studio.app"
+xattr -d com.apple.quarantine "/Applications/Topic\ Desk\ Studio.app"
 ```
 
 ## 翻译与凭据存储
