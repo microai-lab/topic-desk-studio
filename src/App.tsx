@@ -1,5 +1,7 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Network, PanelRight, Radar, RefreshCw, Search, Settings, SlidersHorizontal, Sparkles } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import {
   browserRequest, collectXiaohongshuSession, getModelSettings, getNetworkSettings, getUiPreferences,
   listTopics, refreshTopics, saveModelSettings, saveNetworkSettings, saveUiPreferences,
@@ -16,7 +18,7 @@ import type { ModelSettings, SourceRegion, TopicCategory, TopicPage, TopicQuery,
 
 const PAGE_SIZE = 20
 type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
-type SettingsTab = 'general' | 'sources' | 'model'
+type SettingsTab = 'general' | 'network' | 'sources' | 'model'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
 
 function formatTime(value: string): string {
@@ -24,6 +26,18 @@ function formatTime(value: string): string {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   }).format(new Date(value))
+}
+
+/** Compare article URLs without cosmetic host, fragment, or trailing-slash differences. */
+function normalizedArticleUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    url.hash = ''
+    url.hostname = url.hostname.replace(/^www\./, '')
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return value.trim().replace(/\/$/, '')
+  }
 }
 
 function RankTrend({ values, label }: { readonly values: number[]; readonly label: string }) {
@@ -36,8 +50,10 @@ function RankTrend({ values, label }: { readonly values: number[]; readonly labe
   )
 }
 
-function TopicCard({ topic, translation, m, onQueueChange, onTranslate, onOpen, selected }: {
+function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTranslate, onOpen, selected }: {
   readonly topic: TopicView
+  /** Mixed-source pages use the query-wide rank; one source keeps its native rank. */
+  readonly displayRank: number
   readonly onOpen: (topic: TopicView) => void
   readonly selected: boolean
   readonly translation?: TranslationState
@@ -54,8 +70,8 @@ function TopicCard({ topic, translation, m, onQueueChange, onTranslate, onOpen, 
 
   return (
     <article className={`topic-card${selected ? ' topic-selected' : ''}`}>
-      <div className="topic-rank" aria-label={`${m.rankLabel} ${topic.rank}`}>
-        <span>{topic.rank}</span>
+      <div className="topic-rank" aria-label={`${m.rankLabel} ${displayRank}`}>
+        <span>{displayRank}</span>
         <small>{m.rankLabel}</small>
       </div>
       <div className="topic-content">
@@ -64,7 +80,8 @@ function TopicCard({ topic, translation, m, onQueueChange, onTranslate, onOpen, 
           <span>{formatTime(topic.updatedAt)}</span>
           {topic.rankDelta !== null && topic.rankDelta !== 0 ? (
             <span className={topic.rankDelta > 0 ? 'rank-up' : 'rank-down'}>
-              {topic.rankDelta > 0 ? `↑ ${topic.rankDelta}` : `↓ ${Math.abs(topic.rankDelta)}`}
+              {topic.rankDelta > 0 ? <ArrowUp aria-hidden="true" /> : <ArrowDown aria-hidden="true" />}
+              {Math.abs(topic.rankDelta)}
             </span>
           ) : null}
         </div>
@@ -122,6 +139,14 @@ export function App() {
     applyTheme(theme)
   }, [theme])
 
+  // Native WebView menus vary by operating system; the browser tab strip owns
+  // the only contextual menu exposed by the application.
+  useEffect(() => {
+    const disableDefaultContextMenu = (event: MouseEvent) => event.preventDefault()
+    document.addEventListener('contextmenu', disableDefaultContextMenu, true)
+    return () => document.removeEventListener('contextmenu', disableDefaultContextMenu, true)
+  }, [])
+
   useEffect(() => {
     if (!uiPreferencesReady) return
     void saveUiPreferences({ locale, theme })
@@ -134,7 +159,10 @@ export function App() {
   const browserCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([])
   const [activeBrowserTabId, setActiveBrowserTabId] = useState('')
+  const browserTabsRef = useRef<BrowserTab[]>([])
+  const activeBrowserTabIdRef = useRef('')
   const browserTabCounter = useRef(0)
+  const topicTabIdsRef = useRef(new Map<string, string>())
   const [readerExpanded, setReaderExpanded] = useState(false)
   const [readerWidth, setReaderWidth] = useState(60)
   const [view, setView]           = useState<ViewMode>('discover')
@@ -167,20 +195,36 @@ export function App() {
   const [proxyUrl,        setProxyUrl]           = useState('')
   const [savingNetwork,   setSavingNetwork]      = useState(false)
 
+  browserTabsRef.current = browserTabs
+  activeBrowserTabIdRef.current = activeBrowserTabId
+
+  /** Keep refs synchronized immediately so consecutive clicks see the latest tab state. */
+  const replaceBrowserTabs = useCallback((next: BrowserTab[]): void => {
+    browserTabsRef.current = next
+    setBrowserTabs(next)
+  }, [])
+
+  const activateBrowserTab = useCallback((id: string): void => {
+    activeBrowserTabIdRef.current = id
+    setActiveBrowserTabId(id)
+  }, [])
+
   /** Browser tabs live above the panel so hiding it does not discard the session. */
-  const addBrowserTab = useCallback((tab?: Omit<BrowserTab, 'id'>): void => {
+  const addBrowserTab = useCallback((tab?: Omit<BrowserTab, 'id'>): string => {
     const id = `tab-${++browserTabCounter.current}`
-    setBrowserTabs((current) => [...current, {
+    replaceBrowserTabs([...browserTabsRef.current, {
       id,
       url: tab?.url ?? '',
       title: tab?.title ?? '',
       ...(tab?.topicId === undefined ? {} : { topicId: tab.topicId }),
+      ...(tab?.sourceUrl === undefined ? {} : { sourceUrl: tab.sourceUrl }),
     }])
-    setActiveBrowserTabId(id)
+    activateBrowserTab(id)
     setBrowserOpen(true)
     setBrowserClosing(false)
     if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
-  }, [])
+    return id
+  }, [activateBrowserTab, replaceBrowserTabs])
 
   const closeBrowser = useCallback((): void => {
     if (browserCloseTimer.current) clearTimeout(browserCloseTimer.current)
@@ -204,13 +248,44 @@ export function App() {
       setBrowserOpen(true)
       setBrowserClosing(false)
       if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
-      if (!activeBrowserTabId && browserTabs[0]) setActiveBrowserTabId(browserTabs[0].id)
+      if (!activeBrowserTabId && browserTabs[0]) activateBrowserTab(browserTabs[0].id)
     }
-  }, [activeBrowserTabId, addBrowserTab, browserOpen, browserTabs, closeBrowser])
+  }, [activateBrowserTab, activeBrowserTabId, addBrowserTab, browserOpen, browserTabs, closeBrowser])
 
   const openTopic = useCallback((topic: TopicView): void => {
-    addBrowserTab({ url: topic.url, title: topic.title, topicId: topic.id })
-  }, [addBrowserTab])
+    const topicUrl = normalizedArticleUrl(topic.url)
+    const topicKeys = [`id:${topic.id}`, `url:${topicUrl}`]
+    const newId = `tab-${++browserTabCounter.current}`
+    setBrowserTabs((currentTabs) => {
+      const mappedId = topicKeys.map((key) => topicTabIdsRef.current.get(key)).find((id) => (
+        id !== undefined && currentTabs.some((tab) => tab.id === id)
+      ))
+      const existing = currentTabs.find((tab) => tab.id === mappedId) ?? currentTabs.find((tab) => (
+        tab.topicId === topic.id
+        || (tab.sourceUrl !== undefined && normalizedArticleUrl(tab.sourceUrl) === topicUrl)
+        || (tab.url !== '' && normalizedArticleUrl(tab.url) === topicUrl)
+      ))
+      // Each distinct topic owns one tab; repeat clicks only activate it.
+      const targetId = existing?.id ?? newId
+      const next = existing
+        ? currentTabs
+        : [...currentTabs, {
+            id: newId,
+            url: topic.url,
+            title: topic.title,
+            topicId: topic.id,
+            sourceUrl: topic.url,
+          }]
+      browserTabsRef.current = next
+      topicKeys.forEach((key) => topicTabIdsRef.current.set(key, targetId))
+      activeBrowserTabIdRef.current = targetId
+      setActiveBrowserTabId(targetId)
+      return next
+    })
+    setBrowserOpen(true)
+    setBrowserClosing(false)
+    if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
+  }, [])
 
   const openXiaohongshuSession = (): void => {
     switchView(prevView)
@@ -225,20 +300,47 @@ export function App() {
   }
 
   const updateBrowserTab = useCallback((id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>): void => {
-    setBrowserTabs((current) => current.map((tab) => tab.id === id ? { ...tab, ...update } : tab))
-  }, [])
+    replaceBrowserTabs(browserTabsRef.current.map((tab) => tab.id === id ? { ...tab, ...update } : tab))
+  }, [replaceBrowserTabs])
+
+  /** Reorder tabs while keeping Chrome-style pinned tabs grouped on the left. */
+  const moveBrowserTab = useCallback((draggedId: string, targetId: string, after: boolean): void => {
+    if (draggedId === targetId) return
+    const current = browserTabsRef.current
+    const dragged = current.find((tab) => tab.id === draggedId)
+    if (!dragged) return
+    const withoutDragged = current.filter((tab) => tab.id !== draggedId)
+    const targetIndex = withoutDragged.findIndex((tab) => tab.id === targetId)
+    if (targetIndex < 0) return
+    withoutDragged.splice(targetIndex + (after ? 1 : 0), 0, dragged)
+    replaceBrowserTabs([
+      ...withoutDragged.filter((tab) => tab.pinned === true),
+      ...withoutDragged.filter((tab) => tab.pinned !== true),
+    ])
+  }, [replaceBrowserTabs])
+
+  /** Pinning is local browser UI state and never recreates the native WebView. */
+  const pinBrowserTab = useCallback((id: string, pinned: boolean): void => {
+    const updated = browserTabsRef.current.map((tab) => tab.id === id ? { ...tab, pinned } : tab)
+    replaceBrowserTabs([
+      ...updated.filter((tab) => tab.pinned === true),
+      ...updated.filter((tab) => tab.pinned !== true),
+    ])
+  }, [replaceBrowserTabs])
 
   const closeBrowserTab = useCallback((id: string): void => {
-    setBrowserTabs((current) => {
-      const index = current.findIndex((tab) => tab.id === id)
-      const next = current.filter((tab) => tab.id !== id)
-      setActiveBrowserTabId((active) => active === id
-        ? (next[Math.min(Math.max(index, 0), next.length - 1)]?.id ?? '')
-        : active)
-      if (next.length === 0) setBrowserOpen(false)
-      return next
-    })
-  }, [])
+    const current = browserTabsRef.current
+    const index = current.findIndex((tab) => tab.id === id)
+    const next = current.filter((tab) => tab.id !== id)
+    replaceBrowserTabs(next)
+    for (const [key, tabId] of topicTabIdsRef.current) {
+      if (tabId === id) topicTabIdsRef.current.delete(key)
+    }
+    if (activeBrowserTabIdRef.current === id) {
+      activateBrowserTab(next[Math.min(Math.max(index, 0), next.length - 1)]?.id ?? '')
+    }
+    if (next.length === 0) setBrowserOpen(false)
+  }, [activateBrowserTab, replaceBrowserTabs])
 
   useEffect(() => {
     const openTab = (event: KeyboardEvent) => {
@@ -263,12 +365,24 @@ export function App() {
   }), [category, insertedTopicIds, pageIndex, region, search, sort, source, view])
 
   // ── Data loading ─────────────────────────────────────────────────
-  const load = useCallback(async (): Promise<void> => {
-    setLoading(true)
-    setError(undefined)
-    try { setPage(await listTopics(query)) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setLoading(false) }
+  const querySequence = useRef(0)
+  const load = useCallback(async (silent = false): Promise<void> => {
+    const sequence = ++querySequence.current
+    if (!silent) {
+      setLoading(true)
+      setError(undefined)
+    }
+    try {
+      const nextPage = await listTopics(query)
+      if (sequence === querySequence.current) setPage(nextPage)
+    } catch (reason) {
+      // Silent reloads keep the last valid page after actions such as collection.
+      if (!silent && sequence === querySequence.current) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
+    } finally {
+      if (!silent && sequence === querySequence.current) setLoading(false)
+    }
   }, [query])
 
   useEffect(() => {
@@ -295,7 +409,8 @@ export function App() {
       setNotice(result.message)
       setInsertedTopicIds(result.insertedTopicIds)
       if (result.insertedTopicIds.length > 0) { setView('new'); setPageIndex(0) }
-      await load()
+      // Manual refresh is a network collection followed by an immediate local query.
+      await load(true)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally { setRefreshing(false) }
@@ -357,12 +472,23 @@ export function App() {
 
   // ── Settings fullscreen ──────────────────────────────────────────
   if (view === 'settings') {
-    const tabIcons: Record<SettingsTab, string> = { general: '⊙', sources: '⌁', model: '◎' }
+    const tabIcons: Record<SettingsTab, LucideIcon> = {
+      general: SlidersHorizontal,
+      network: Network,
+      sources: Database,
+      model: Bot,
+    }
+    const tabLabels: Record<SettingsTab, string> = {
+      general: m.tabGeneral,
+      network: m.sectionNetwork,
+      sources: m.tabSources,
+      model: m.tabModel,
+    }
     return (
       <div className="settings-fullscreen">
         <header className="settings-fs-header">
           <button className="back-button" type="button" onClick={() => switchView(prevView)}>
-            <span>←</span>{m.settingsBack}
+            <ArrowLeft aria-hidden="true" />{m.settingsBack}
           </button>
           <span className="settings-fs-title">{m.settingsTitle}</span>
         </header>
@@ -370,16 +496,19 @@ export function App() {
         <div className="settings-layout">
           {/* Left tab nav */}
           <nav className="settings-tabs" aria-label={m.settingsTitle}>
-            {(['general', 'sources', 'model'] as SettingsTab[]).map((tab) => (
-              <button
-                key={tab}
-                className={settingsTab === tab ? 'settings-tab active' : 'settings-tab'}
-                onClick={() => setSettingsTab(tab)}
-              >
-                <span className="settings-tab-icon">{tabIcons[tab]}</span>
-                {tab === 'general' ? m.tabGeneral : tab === 'sources' ? m.tabSources : m.tabModel}
-              </button>
-            ))}
+            {(['general', 'sources', 'model', 'network'] as SettingsTab[]).map((tab) => {
+              const TabIcon = tabIcons[tab]
+              return (
+                <button
+                  key={tab}
+                  className={settingsTab === tab ? 'settings-tab active' : 'settings-tab'}
+                  onClick={() => setSettingsTab(tab)}
+                >
+                  <TabIcon className="settings-tab-icon" aria-hidden="true" />
+                  {tabLabels[tab]}
+                </button>
+              )
+            })}
           </nav>
 
           {/* Right panel */}
@@ -423,28 +552,30 @@ export function App() {
                     </div>
                   </div>
                 </div>
-
-                {/* Native collection traffic never crosses the WebView network boundary. */}
-                <div className="pref-section">
-                  <p className="pref-section-title">{m.sectionNetwork}</p>
-                  <div className="network-setting">
-                    <label>
-                      <span>{m.labelProxy}</span>
-                      <input
-                        value={proxyUrl}
-                        onChange={(event) => setProxyUrl(event.target.value)}
-                        placeholder={m.proxyPlaceholder}
-                        spellCheck={false}
-                        autoComplete="off"
-                      />
-                    </label>
-                    <p>{m.proxyHelp}</p>
-                    <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
-                      {savingNetwork ? m.btnSaving : m.btnSave}
-                    </button>
-                  </div>
-                </div>
               </>
+            )}
+
+            {settingsTab === 'network' && (
+              /* Native collection traffic never crosses the WebView network boundary. */
+              <div className="pref-section">
+                <p className="pref-section-title">{m.sectionNetwork}</p>
+                <div className="network-setting">
+                  <label>
+                    <span>{m.labelProxy}</span>
+                    <input
+                      value={proxyUrl}
+                      onChange={(event) => setProxyUrl(event.target.value)}
+                      placeholder={m.proxyPlaceholder}
+                      spellCheck={false}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <p>{m.proxyHelp}</p>
+                  <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
+                    {savingNetwork ? m.btnSaving : m.btnSave}
+                  </button>
+                </div>
+              </div>
             )}
 
             {settingsTab === 'sources' && (
@@ -523,19 +654,19 @@ export function App() {
 
         <nav aria-label={m.navSettings}>
           <button className={view === 'discover' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('discover')}>
-            <span>◫</span>{m.navDiscover}
+            <Compass aria-hidden="true" />{m.navDiscover}
           </button>
           <button className={view === 'queue' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('queue')}>
-            <span>◇</span>{m.navQueue} <small>{page?.queuedTotal ?? 0}</small>
+            <Bookmark aria-hidden="true" />{m.navQueue} <small>{page?.queuedTotal ?? 0}</small>
           </button>
           <button className={view === 'new' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('new')}>
-            <span>✦</span>{m.navNew} <small>{insertedTopicIds.length}</small>
+            <Sparkles aria-hidden="true" />{m.navNew} <small>{insertedTopicIds.length}</small>
           </button>
         </nav>
 
         <div className="sidebar-footer">
           <button className="nav-item" onClick={() => switchView('settings')}>
-            <span>⚙</span>{m.navSettings}
+            <Settings aria-hidden="true" />{m.navSettings}
           </button>
         </div>
       </aside>
@@ -546,6 +677,7 @@ export function App() {
           <div className="topbar-main">
             <h1>{viewTitle}</h1>
             <label className="topbar-search">
+              <Search aria-hidden="true" />
               <input
                 aria-label={m.filterSearch}
                 value={search}
@@ -555,62 +687,71 @@ export function App() {
             </label>
           </div>
           <div className="topbar-actions">
-            <button className="primary-button" type="button" disabled={refreshing} onClick={() => void collect()}>
-              {refreshing ? m.btnRefreshing : m.btnRefresh}
+            <button className={`query-button topbar-icon-button${loading ? ' busy' : ''}`} type="button" disabled={loading || refreshing} aria-label={loading ? m.btnQuerying : m.btnQuery} title={loading ? m.btnQuerying : m.btnQuery} onClick={() => void load()}>
+              <RefreshCw aria-hidden="true" />
             </button>
-            <button className={`side-panel-toggle${browserOpen ? ' active' : ''}`} type="button" aria-pressed={browserOpen} title={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} onClick={toggleBrowser}><span aria-hidden="true">◧</span></button>
+            <button className={`primary-button topbar-icon-button${refreshing ? ' busy' : ''}`} type="button" disabled={refreshing} aria-label={refreshing ? m.btnRefreshing : m.btnRefresh} title={refreshing ? m.btnRefreshing : m.btnRefresh} onClick={() => void collect()}>
+              <Radar aria-hidden="true" />
+            </button>
+            <button className={`side-panel-toggle topbar-icon-button${browserOpen ? ' active' : ''}`} type="button" aria-label={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} aria-pressed={browserOpen} title={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} onClick={toggleBrowser}><PanelRight aria-hidden="true" /></button>
           </div>
         </header>
 
-        <section className="filters" aria-label={m.filterSearch}>
-          <label>
-            <span>{m.filterSource}</span>
-            <select value={source} onChange={(e) => { setSource(e.target.value); setPageIndex(0) }}>
-              <option value="all">{m.filterAllSources}</option>
-              {page?.statuses.map((s) => <option key={s.code} value={s.code}>{s.displayName}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>{m.filterRegion}</span>
-            <select value={region} onChange={(e) => { setRegion(e.target.value as typeof region); setPageIndex(0) }}>
-              <option value="all">{m.filterAllRegions}</option>
-              <option value="domestic">{m.filterDomestic}</option>
-              <option value="international">{m.filterInternational}</option>
-            </select>
-          </label>
-          <label>
-            <span>{m.filterCategory}</span>
-            <select value={category} onChange={(e) => { setCategory(e.target.value as typeof category); setPageIndex(0) }}>
-              <option value="all">{m.filterAllCategories}</option>
-              <option value="general">{m.filterGeneral}</option>
-              <option value="technology">{m.filterTech}</option>
-              <option value="finance">{m.filterFinance}</option>
-              <option value="developer">{m.filterDev}</option>
-            </select>
-          </label>
-          <label>
-            <span>{m.filterSort}</span>
-            <select value={sort} onChange={(e) => { setSort(e.target.value as typeof sort); setPageIndex(0) }}>
-              <option value="rank">{m.filterSortRank}</option>
-              <option value="updated">{m.filterSortUpdated}</option>
-            </select>
-          </label>
-        </section>
+        <div className="list-sticky-controls">
+          <section className="filters" aria-label={m.filterSearch}>
+            <label>
+              <span>{m.filterSource}</span>
+              <select value={source} onChange={(e) => { setSource(e.target.value); setPageIndex(0) }}>
+                <option value="all">{m.filterAllSources}</option>
+                {page?.statuses.map((s) => <option key={s.code} value={s.code}>{s.displayName}</option>)}
+              </select>
+              <ChevronDown className="filter-chevron" aria-hidden="true" />
+            </label>
+            <label>
+              <span>{m.filterRegion}</span>
+              <select value={region} onChange={(e) => { setRegion(e.target.value as typeof region); setPageIndex(0) }}>
+                <option value="all">{m.filterAllRegions}</option>
+                <option value="domestic">{m.filterDomestic}</option>
+                <option value="international">{m.filterInternational}</option>
+              </select>
+              <ChevronDown className="filter-chevron" aria-hidden="true" />
+            </label>
+            <label>
+              <span>{m.filterCategory}</span>
+              <select value={category} onChange={(e) => { setCategory(e.target.value as typeof category); setPageIndex(0) }}>
+                <option value="all">{m.filterAllCategories}</option>
+                <option value="general">{m.filterGeneral}</option>
+                <option value="technology">{m.filterTech}</option>
+                <option value="finance">{m.filterFinance}</option>
+                <option value="developer">{m.filterDev}</option>
+              </select>
+              <ChevronDown className="filter-chevron" aria-hidden="true" />
+            </label>
+            <label>
+              <span>{m.filterSort}</span>
+              <select value={sort} onChange={(e) => { setSort(e.target.value as typeof sort); setPageIndex(0) }}>
+                <option value="rank">{m.filterSortRank}</option>
+                <option value="updated">{m.filterSortUpdated}</option>
+              </select>
+              <ChevronDown className="filter-chevron" aria-hidden="true" />
+            </label>
+          </section>
+          <div className="results-heading">
+            <span>{m.resultsTotal(page?.total ?? 0)}</span>
+            <span>{m.resultsErrors(page?.statuses.filter((s) => s.error !== null).length ?? 0)}</span>
+          </div>
+        </div>
 
         {notice !== undefined ? <div className="notice">{notice}</div> : null}
         {error  !== undefined ? <div className="error-banner">{error}</div> : null}
 
         <section className="results" aria-live="polite">
-          <div className="results-heading">
-            <span>{m.resultsTotal(page?.total ?? 0)}</span>
-            <span>{m.resultsErrors(page?.statuses.filter((s) => s.error !== null).length ?? 0)}</span>
-          </div>
           {loading ? (
             <div className="empty-state"><div className="loader" /><p>{m.resultsLoading}</p></div>
           ) : null}
           {!loading && page?.topics.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-glyph">✦</div>
+              <div className="empty-glyph"><Sparkles aria-hidden="true" /></div>
               <h2>{m.resultsEmptyTitle}</h2>
               <p>{m.resultsEmptyBody}</p>
             </div>
@@ -618,6 +759,7 @@ export function App() {
           {!loading ? page?.topics.map((topic) => (
             <TopicCard
               key={topic.id} topic={topic} m={m}
+              displayRank={source === 'all' ? topic.globalRank : topic.rank}
               {...(translations[topic.id] === undefined ? {} : { translation: translations[topic.id] })}
               onQueueChange={changeQueue} onTranslate={translate}
               onOpen={openTopic} selected={browserTabs.find((tab) => tab.id === activeBrowserTabId)?.topicId === topic.id}
@@ -632,7 +774,8 @@ export function App() {
         </footer>
       </main>
       {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing}
-        onActivate={setActiveBrowserTabId} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
+        onActivate={activateBrowserTab} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
+        onMoveTab={moveBrowserTab} onPinTab={pinBrowserTab}
         onExpand={() => setReaderExpanded((value) => !value)}
         onCollectXiaohongshu={collectXiaohongshu}
         onClose={closeBrowser}

@@ -67,14 +67,14 @@ export interface BrowserBounds { x: number; y: number; width: number; height: nu
 let browserQueue: Promise<void> = Promise.resolve()
 
 /** Serialize creation, resize, navigation and close to avoid stale native views. */
-export function browserRequest(action: 'sync' | 'close' | 'closeAll' | 'hideAll' | 'back' | 'forward' | 'reload', tabId?: string, bounds?: BrowserBounds, url?: string): Promise<void> {
+export function browserRequest(action: 'sync' | 'close' | 'closeAll' | 'hideAll' | 'back' | 'forward' | 'reload' | 'mute' | 'unmute', tabId?: string, bounds?: BrowserBounds, url?: string): Promise<void> {
   const next = browserQueue.then(() => invoke<void>('browser_request', { action, tabId: tabId ?? null, bounds: bounds ?? null, url: url ?? null }))
   browserQueue = next.catch(() => {})
   return next
 }
 
 /** Native browser state is emitted only to the trusted main webview. */
-export interface BrowserStatus { tabId: string; url: string; title: string; loading: boolean; canBack: boolean; canForward: boolean }
+export interface BrowserStatus { tabId: string; url: string; title: string; loading: boolean; canBack: boolean; canForward: boolean; muted: boolean }
 /** Browser preferences persisted by Rust independently of topic settings. */
 export interface BrowserSettings { searchEngine: 'bing' | 'google' | 'duckduckgo'; zoom: number; rememberHistory: boolean }
 /** Local browser history or download metadata. */

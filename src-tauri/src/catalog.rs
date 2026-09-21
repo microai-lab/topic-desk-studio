@@ -33,7 +33,7 @@ pub const PLATFORM_CATALOG: &[PlatformDefinition] = &[
     PlatformDefinition { code: "google-trends-global", display_name: "Google Trends 全球", home_url: "https://trends.google.com/trending?geo=US", endpoint_url: "https://trends.google.com/trending/rss?geo=US" },
     PlatformDefinition { code: "coingecko", display_name: "CoinGecko", home_url: "https://www.coingecko.com/", endpoint_url: "https://api.coingecko.com/api/v3/search/trending" },
     PlatformDefinition { code: "github", display_name: "GitHub", home_url: "https://github.com/trending", endpoint_url: "https://github.com/trending?since=daily" },
-    PlatformDefinition { code: "hugging-face", display_name: "Hugging Face", home_url: "https://huggingface.co/papers", endpoint_url: "https://huggingface.co/api/daily_papers" },
+    PlatformDefinition { code: "hugging-face", display_name: "Hugging Face", home_url: "https://huggingface.co/models?sort=trending", endpoint_url: "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=50&expand=trendingScore,likes,downloads,createdAt,lastModified" },
     PlatformDefinition { code: "arxiv", display_name: "arXiv", home_url: "https://arxiv.org/", endpoint_url: "https://arxiv.org/list/cs.AI/recent?skip=0&show=100" },
     PlatformDefinition { code: "bluesky", display_name: "Bluesky", home_url: "https://bsky.app/", endpoint_url: "https://public.api.bsky.app/xrpc/app.bsky.unspecced.getTrendingTopics" },
     PlatformDefinition { code: "polymarket", display_name: "Polymarket", home_url: "https://polymarket.com/", endpoint_url: "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=100" },

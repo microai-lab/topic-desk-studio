@@ -15,7 +15,70 @@ use tauri::{
 /// Keep ordinary `target=_blank` links inside the single reading pane. The
 /// native new-window handler below remains the security backstop for scripts
 /// that call `window.open` directly.
-const SINGLE_PANE_LINK_SCRIPT: &str = r#"
+const ARTICLE_INITIALIZATION_SCRIPT: &str = r#"
+(() => {
+  // WKWebView asks macOS Keychain for an application-wide master key when a
+  // CryptoKey is serialized into IndexedDB, even with a non-persistent data
+  // store. Reader pages may use WebCrypto in memory, but must not persist its
+  // key objects or make the host application touch the system credential store.
+  const CryptoKeyType = globalThis.CryptoKey;
+  if (typeof CryptoKeyType === 'function') {
+    const containsCryptoKey = (root) => {
+      const pending = [root];
+      const seen = new WeakSet();
+      while (pending.length) {
+        const value = pending.pop();
+        if (value instanceof CryptoKeyType) return true;
+        if (value === null || (typeof value !== 'object' && typeof value !== 'function')) continue;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) continue;
+        if (globalThis.Blob && value instanceof Blob) continue;
+        if (value instanceof Date || value instanceof RegExp) continue;
+        if (value instanceof Map) {
+          for (const [key, item] of value) pending.push(key, item);
+          continue;
+        }
+        if (value instanceof Set) {
+          for (const item of value) pending.push(item);
+          continue;
+        }
+        try {
+          for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+            if ('value' in descriptor) pending.push(descriptor.value);
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+    const writeMethods = [
+      [globalThis.IDBObjectStore?.prototype, 'add'],
+      [globalThis.IDBObjectStore?.prototype, 'put'],
+      [globalThis.IDBCursor?.prototype, 'update'],
+    ];
+    for (const [prototype, method] of writeMethods) {
+      if (!prototype) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
+      if (!descriptor || typeof descriptor.value !== 'function') continue;
+      const nativeMethod = descriptor.value;
+      Object.defineProperty(prototype, method, {
+        ...descriptor,
+        configurable: false,
+        writable: false,
+        value(value, ...args) {
+          if (containsCryptoKey(value)) {
+            throw new DOMException(
+              'CryptoKey persistence is disabled in the temporary reader',
+              'DataCloneError',
+            );
+          }
+          return Reflect.apply(nativeMethod, this, [value, ...args]);
+        },
+      });
+    }
+  }
+})();
+document.addEventListener('contextmenu', (event) => event.preventDefault(), true);
 document.addEventListener('click', (event) => {
   const path = event.composedPath();
   const link = path.find((node) => node instanceof HTMLAnchorElement);
@@ -28,6 +91,32 @@ document.addEventListener('click', (event) => {
   } catch (_) {}
 }, true);
 "#;
+
+/// Apply tab-level website muting without exposing a command surface to the
+/// untrusted page. The observer covers media elements added after page load.
+fn apply_media_muting(view: &tauri::Webview, muted: bool) -> Result<(), String> {
+    let script = format!(
+        r#"(() => {{
+  window.__topicDeskMuted = {muted};
+  const apply = (root) => {{
+    if (root instanceof HTMLMediaElement) root.muted = window.__topicDeskMuted;
+    if (root.querySelectorAll) {{
+      for (const media of root.querySelectorAll('audio, video')) media.muted = window.__topicDeskMuted;
+    }}
+  }};
+  apply(document);
+  if (!window.__topicDeskMuteObserver) {{
+    window.__topicDeskMuteObserver = new MutationObserver((records) => {{
+      for (const record of records) for (const node of record.addedNodes) {{
+        if (node instanceof Element) apply(node);
+      }}
+    }});
+    window.__topicDeskMuteObserver.observe(document.documentElement, {{ childList: true, subtree: true }});
+  }}
+}})()"#
+    );
+    view.eval(&script).map_err(|error| error.to_string())
+}
 
 /// CSS-pixel rectangle measured by the trusted UI; never supplied by remote pages.
 #[derive(Clone, Deserialize)]
@@ -211,18 +300,24 @@ pub fn browser_request(
                 LogicalPosition::new(bounds.x + origin.x, bounds.y + origin.y + titlebar);
             let size = LogicalSize::new(bounds.width, bounds.height);
             hide_article_views(app, Some(&label))?;
-            app.state::<BrowserProfile>()
-                .inner
-                .lock()
-                .map_err(|e| e.to_string())?
-                .active_tab = Some(tab_id.into());
+            let target_loading = {
+                let profile = app.state::<BrowserProfile>();
+                let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
+                session.active_tab = Some(tab_id.into());
+                session
+                    .tabs
+                    .get(tab_id)
+                    .is_some_and(|tab| tab.status.loading)
+            };
             if let Some(view) = app.get_webview(&label) {
                 view.set_bounds(tauri::Rect {
                     position: position.into(),
                     size: size.into(),
                 })
                 .map_err(|e| e.to_string())?;
-                view.show().map_err(|e| e.to_string())?;
+                if !target_loading {
+                    view.show().map_err(|e| e.to_string())?;
+                }
                 if let Some(url) = parsed {
                     view.navigate(url).map_err(|e| e.to_string())?;
                 }
@@ -252,7 +347,9 @@ pub fn browser_request(
                     // Ephemeral article views must never create WebCrypto or password material
                     // in the operating-system credential store.
                     .incognito(true)
-                    .initialization_script(SINGLE_PANE_LINK_SCRIPT)
+                    // Run the storage guard in every frame because third-party
+                    // embeds can otherwise serialize a key through their own IDB.
+                    .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
                     .on_navigation(is_article_url)
                     .on_document_title_changed(move |view, title| {
                         browser_profile::title_changed(view.app_handle(), &title_tab, title)
@@ -264,12 +361,52 @@ pub fn browser_request(
                             return;
                         };
                         browser_profile::navigated(view.app_handle(), &page_tab, current.as_str());
-                        if matches!(payload.event(), PageLoadEvent::Finished) {
-                            browser_profile::page_finished(
-                                view.app_handle(),
-                                &page_tab,
-                                current.as_str(),
-                            );
+                        match payload.event() {
+                            PageLoadEvent::Started => {
+                                // Let WebKit paint the response progressively instead of
+                                // withholding usable content until every slow subresource
+                                // finishes. The trusted React chrome keeps showing its
+                                // loading indicator above the child view.
+                                let active = view
+                                    .app_handle()
+                                    .state::<BrowserProfile>()
+                                    .inner
+                                    .lock()
+                                    .ok()
+                                    .is_some_and(|session| {
+                                        session.active_tab.as_deref() == Some(&page_tab)
+                                    });
+                                if active {
+                                    let _ = view.show();
+                                }
+                            }
+                            PageLoadEvent::Finished => {
+                                browser_profile::page_finished(
+                                    view.app_handle(),
+                                    &page_tab,
+                                    current.as_str(),
+                                );
+                                let (muted, active) = view
+                                    .app_handle()
+                                    .state::<BrowserProfile>()
+                                    .inner
+                                    .lock()
+                                    .ok()
+                                    .map(|session| {
+                                        (
+                                            session
+                                                .tabs
+                                                .get(&page_tab)
+                                                .is_some_and(|tab| tab.status.muted),
+                                            session.active_tab.as_deref() == Some(&page_tab),
+                                        )
+                                    })
+                                    .unwrap_or((false, false));
+                                let _ = apply_media_muting(&view, muted);
+                                if active {
+                                    let _ = view.show();
+                                }
+                            }
                         }
                     })
                     .on_download(move |view, event| {
@@ -373,9 +510,79 @@ pub fn browser_request(
             }
             .map_err(|error| error.to_string())
         }
+        "mute" | "unmute" => {
+            let tab_id = tab_id.as_deref().ok_or("缺少浏览器标签页")?;
+            let muted = action == "mute";
+            let status = {
+                let profile = app.state::<BrowserProfile>();
+                let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
+                let tab = session.tabs.get_mut(tab_id).ok_or("浏览区域未打开")?;
+                tab.status.muted = muted;
+                tab.status.clone()
+            };
+            if let Some(view) = app.get_webview(&tab_label(tab_id)?) {
+                apply_media_muting(&view, muted)?;
+            }
+            browser_profile::publish(app, &status);
+            Ok(())
+        }
         _ => return Err("未知浏览操作".into()),
     };
     result.map_err(|error| error.to_string())
+}
+
+/// Capture only the web content through WKWebView, without desktop screen permission.
+#[cfg(target_os = "macos")]
+pub fn capture_screenshot(view: &tauri::Webview) -> Result<Vec<u8>, String> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+    use objc2_foundation::{NSDictionary, NSError};
+    use objc2_web_kit::WKWebView;
+    let (tx, rx) = std::sync::mpsc::channel();
+    view.with_webview(move |platform| {
+        let block = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let result = (|| {
+                if !error.is_null() || image.is_null() {
+                    return Err("网页截图失败".to_string());
+                }
+                // WebKit owns these callback pointers for the duration of this call.
+                let image = unsafe { &*image };
+                let tiff = image.TIFFRepresentation().ok_or("无法编码网页截图")?;
+                let bitmap = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)
+                    .ok_or("无法读取网页截图")?;
+                let png = unsafe {
+                    bitmap.representationUsingType_properties(
+                        NSBitmapImageFileType::PNG,
+                        &NSDictionary::new(),
+                    )
+                }
+                .ok_or("无法生成 PNG")?;
+                Ok(png.to_vec())
+            })();
+            let _ = tx.send(result);
+        });
+        // Tauri guarantees this callback executes on the UI thread with a live WKWebView.
+        unsafe {
+            (&*platform.inner().cast::<WKWebView>())
+                .takeSnapshotWithConfiguration_completionHandler(None, &block);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    let bytes = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .map_err(|_| "网页截图超时")??;
+    Ok(bytes)
+}
+
+/// Other desktop adapters keep the command explicit until their native capture is provided.
+#[cfg(not(target_os = "macos"))]
+pub fn capture_screenshot(_view: &tauri::Webview) -> Result<Vec<u8>, String> {
+    Err("当前平台暂不支持原生网页截图".into())
+}
+
+/// Save a native viewport capture into a caller-controlled download destination.
+pub fn save_screenshot(view: &tauri::Webview, path: &std::path::Path) -> Result<(), String> {
+    std::fs::write(path, capture_screenshot(view)?).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -470,58 +677,4 @@ mod tests {
             assert!(tab_label(value).is_err(), "label must reject {value:?}");
         }
     }
-}
-
-/// Capture only the web content through WKWebView, without desktop screen permission.
-#[cfg(target_os = "macos")]
-pub fn capture_screenshot(view: &tauri::Webview) -> Result<Vec<u8>, String> {
-    use objc2::AnyThread;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
-    use objc2_foundation::{NSDictionary, NSError};
-    use objc2_web_kit::WKWebView;
-    let (tx, rx) = std::sync::mpsc::channel();
-    view.with_webview(move |platform| {
-        let block = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
-            let result = (|| {
-                if !error.is_null() || image.is_null() {
-                    return Err("网页截图失败".to_string());
-                }
-                // WebKit owns these callback pointers for the duration of this call.
-                let image = unsafe { &*image };
-                let tiff = image.TIFFRepresentation().ok_or("无法编码网页截图")?;
-                let bitmap = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)
-                    .ok_or("无法读取网页截图")?;
-                let png = unsafe {
-                    bitmap.representationUsingType_properties(
-                        NSBitmapImageFileType::PNG,
-                        &NSDictionary::new(),
-                    )
-                }
-                .ok_or("无法生成 PNG")?;
-                Ok(png.to_vec())
-            })();
-            let _ = tx.send(result);
-        });
-        // Tauri guarantees this callback executes on the UI thread with a live WKWebView.
-        unsafe {
-            (&*platform.inner().cast::<WKWebView>())
-                .takeSnapshotWithConfiguration_completionHandler(None, &block);
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    let bytes = rx
-        .recv_timeout(std::time::Duration::from_secs(20))
-        .map_err(|_| "网页截图超时")??;
-    Ok(bytes)
-}
-
-/// Other desktop adapters keep the command explicit until their native capture is provided.
-#[cfg(not(target_os = "macos"))]
-pub fn capture_screenshot(_view: &tauri::Webview) -> Result<Vec<u8>, String> {
-    Err("当前平台暂不支持原生网页截图".into())
-}
-
-/// Save a native viewport capture into a caller-controlled download destination.
-pub fn save_screenshot(view: &tauri::Webview, path: &std::path::Path) -> Result<(), String> {
-    std::fs::write(path, capture_screenshot(view)?).map_err(|e| e.to_string())
 }

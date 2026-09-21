@@ -22,6 +22,7 @@ use crate::repository::TopicRepository;
 const ITEMS_PER_PLATFORM: usize = 50;
 const REQUEST_TIMEOUT_SECONDS: u64 = 15;
 const MAX_WORKERS: usize = 6;
+const HUGGING_FACE_TRENDING_MODELS_ENDPOINT: &str = "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=50&expand=trendingScore,likes,downloads,createdAt,lastModified";
 const USER_AGENT_VALUE: &str =
     "TopicDeskStudio/0.1 (+https://github.com/dataelement/topic-desk-studio)";
 
@@ -145,7 +146,13 @@ fn source_requires_proxy(code: &str) -> bool {
 
 /// Fetch one source with known fallbacks and reject an apparently successful empty parse.
 fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
-    let mut endpoints = vec![platform.endpoint_url.as_str()];
+    // The canonical project-ranking endpoint supersedes the legacy daily-papers
+    // URL already stored by older installations without overwriting user settings.
+    let mut endpoints = if platform.code == "hugging-face" {
+        vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
+    } else {
+        vec![platform.endpoint_url.as_str()]
+    };
     match platform.code.as_str() {
         "36kr" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=36kr"),
         "xueqiu" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=xueqiu"),
@@ -205,6 +212,13 @@ fn fetch_endpoint(
     }
     if platform.code == "xiaohongshu" {
         return parse_xiaohongshu(&platform.code, decode_text(&bytes, &content_type));
+    }
+    if platform.code == "github" {
+        return parse_github_trending(
+            &platform.code,
+            decode_text(&bytes, &content_type),
+            final_url.as_str(),
+        );
     }
     if is_html_source(&platform.code) && final_url.host_str() != Some("news.orz.ai") {
         return parse_html_links(
@@ -438,14 +452,13 @@ fn json_topic(code: &str, item: &Value, endpoint: &str, rank: usize) -> Option<C
                 )
             }
             "hugging-face" => {
-                let paper = item.get("paper").unwrap_or(item);
-                let id = text(paper.get("id"));
+                let id = text(item.get("modelId")).or_else(|| text(item.get("id")));
                 (
                     id.clone(),
-                    text(paper.get("title")),
-                    Some(format!("https://huggingface.co/papers/{}", id?)),
-                    text(paper.get("publishedAt")),
-                    number(paper.get("upvotes")),
+                    id.clone(),
+                    Some(format!("https://huggingface.co/{}", id?)),
+                    text(item.get("createdAt")).or_else(|| text(item.get("lastModified"))),
+                    number(item.get("trendingScore")).or_else(|| number(item.get("likes"))),
                 )
             }
             "bluesky" => {
@@ -580,6 +593,68 @@ fn parse_html_links(code: &str, html: String, base: &str) -> AppResult<ParsedFee
     Ok(ParsedFeed {
         fetched_count: topics.len() as u32,
         invalid_count: 0,
+        topics,
+    })
+}
+
+/// Parse GitHub's daily Trending board as repositories ranked by stars gained today.
+fn parse_github_trending(code: &str, html: String, base: &str) -> AppResult<ParsedFeed> {
+    let article = Regex::new(
+        r#"(?is)<article\b[^>]*class=["'][^"']*\bbox-row\b[^"']*["'][^>]*>(.*?)</article>"#,
+    )
+    .map_err(collection_error)?;
+    let repository = Regex::new(r#"(?is)<h2\b.*?<a\b[^>]*href=["'](/[^/"'#?]+/[^/"'#?]+)["']"#)
+        .map_err(collection_error)?;
+    let daily_stars =
+        Regex::new(r"(?i)([\d,.]+(?:\.\d+)?[km]?)\s+stars?\s+today").map_err(collection_error)?;
+    let mut topics = Vec::new();
+    let mut seen = HashSet::new();
+    let fetched_count = article.captures_iter(&html).count().min(ITEMS_PER_PLATFORM) as u32;
+    for card in article.captures_iter(&html).take(ITEMS_PER_PLATFORM) {
+        let Some(path) = repository
+            .captures(&card[1])
+            .map(|captures| captures[1].to_owned())
+        else {
+            continue;
+        };
+        let title = path.trim_matches('/').to_owned();
+        let card_text = plain_text(&card[1]);
+        let Some(heat) = daily_stars
+            .captures(&card_text)
+            .and_then(|captures| compact_number(&captures[1]))
+        else {
+            continue;
+        };
+        if !seen.insert(title.clone()) {
+            continue;
+        }
+        if let Some(topic) = make_topic(
+            code,
+            topics.len() + 1,
+            Some(title.clone()),
+            Some(title),
+            Some(path),
+            None,
+            Some(heat),
+            base,
+        ) {
+            topics.push(topic);
+        }
+    }
+    // GitHub's page order mixes several signals; the product promise is the
+    // fastest daily star growth, so make that metric the deterministic rank.
+    topics.sort_by(|left, right| {
+        right
+            .heat
+            .partial_cmp(&left.heat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (index, topic) in topics.iter_mut().enumerate() {
+        topic.rank = (index + 1) as u32;
+    }
+    Ok(ParsedFeed {
+        invalid_count: fetched_count.saturating_sub(topics.len() as u32),
+        fetched_count,
         topics,
     })
 }
@@ -798,6 +873,17 @@ fn number(value: Option<&Value>) -> Option<f64> {
     })
 }
 
+/// Decode compact counters used by project boards, such as `1,240` or `2.3k`.
+fn compact_number(value: &str) -> Option<f64> {
+    let normalized = value.trim().to_ascii_lowercase().replace(',', "");
+    let (number, multiplier) = match normalized.chars().last()? {
+        'k' => (&normalized[..normalized.len() - 1], 1_000.0),
+        'm' => (&normalized[..normalized.len() - 1], 1_000_000.0),
+        _ => (normalized.as_str(), 1.0),
+    };
+    number.parse::<f64>().ok().map(|value| value * multiplier)
+}
+
 fn unix_time(value: Option<&Value>) -> Option<String> {
     let raw = value.and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))?;
     let seconds = if raw > 10_000_000_000 {
@@ -919,6 +1005,42 @@ mod tests {
     #[test]
     fn strips_html_from_titles() {
         assert_eq!(plain_text("<b>Hello</b> &amp; world"), "Hello & world");
+    }
+
+    /// GitHub entries must be repositories ordered by today's star gain, not article links.
+    #[test]
+    fn parses_github_projects_by_daily_star_growth() {
+        let html = r#"
+          <article class="Box-row"><h2><a href="/slow/project">slow / project</a></h2><span>124 stars today</span></article>
+          <article class="Box-row"><h2><a href="/fast/project">fast / project</a></h2><span>1.2k stars today</span></article>
+        "#;
+        let feed = parse_github_trending("github", html.into(), "https://github.com/trending")
+            .expect("GitHub fixture should parse");
+        assert_eq!(feed.topics.len(), 2);
+        assert_eq!(feed.topics[0].title, "fast/project");
+        assert_eq!(feed.topics[0].url, "https://github.com/fast/project");
+        assert_eq!(feed.topics[0].heat, Some(1_200.0));
+    }
+
+    /// Hugging Face must expose model repositories ranked by trending score, not papers.
+    #[test]
+    fn parses_hugging_face_trending_models() {
+        let payload = serde_json::json!([{
+            "id": "org/hot-model",
+            "trendingScore": 87,
+            "likes": 420,
+            "createdAt": "2026-09-20T00:00:00.000Z"
+        }]);
+        let feed = parse_json(
+            "hugging-face",
+            &payload,
+            HUGGING_FACE_TRENDING_MODELS_ENDPOINT,
+        )
+        .expect("Hugging Face fixture should parse");
+        assert_eq!(feed.topics.len(), 1);
+        assert_eq!(feed.topics[0].title, "org/hot-model");
+        assert_eq!(feed.topics[0].url, "https://huggingface.co/org/hot-model");
+        assert_eq!(feed.topics[0].heat, Some(87.0));
     }
 
     #[test]

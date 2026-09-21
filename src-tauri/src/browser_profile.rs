@@ -20,6 +20,7 @@ pub struct BrowserStatus {
     pub loading: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    pub muted: bool,
 }
 
 /// Persisted browser preferences are validated before affecting navigation or storage.

@@ -13,6 +13,8 @@ export interface Messages {
   // Topbar
   btnRefresh: string
   btnRefreshing: string
+  btnQuery: string
+  btnQuerying: string
   // Filters
   filterSource: string
   filterAllSources: string
@@ -98,8 +100,10 @@ const zh: Messages = {
   navQueue: '待创作',
   navNew: '本轮新增',
   navSettings: '设置',
-  btnRefresh: '刷新数据',
-  btnRefreshing: '刷新中…',
+  btnRefresh: '采集数据',
+  btnRefreshing: '采集中…',
+  btnQuery: '刷新列表',
+  btnQuerying: '查询中…',
   filterSource: '来源',
   filterAllSources: '全部来源',
   filterRegion: '地区',
@@ -121,7 +125,7 @@ const zh: Messages = {
   resultsErrors: (n) => `${n} 个来源异常`,
   resultsLoading: '正在读取本地选题库…',
   resultsEmptyTitle: '本地选题库还是空的',
-  resultsEmptyBody: '点击"刷新数据"开始采集，之后可以在这里筛选、追踪并加入待创作。',
+  resultsEmptyBody: '点击“采集数据”开始采集，之后可以在这里筛选、追踪并加入待创作。',
   rankLabel: 'RANK',
   trendAccum: '趋势积累中',
   translateBtn: '译为中文',
@@ -148,7 +152,7 @@ const zh: Messages = {
   sectionLanguage: '语言',
   langZh: '中文',
   langEn: 'English',
-  sectionNetwork: '采集网络',
+  sectionNetwork: '网络代理',
   labelProxy: 'HTTP(S) 代理',
   proxyPlaceholder: '例如 http://127.0.0.1:7897',
   proxyHelp: '仅直连受限的境外来源使用该代理；国内及可直连来源保持直连。留空表示全部直连。',
@@ -176,8 +180,10 @@ const en: Messages = {
   navQueue: 'Queue',
   navNew: 'New this run',
   navSettings: 'Settings',
-  btnRefresh: 'Refresh',
-  btnRefreshing: 'Refreshing…',
+  btnRefresh: 'Collect',
+  btnRefreshing: 'Collecting…',
+  btnQuery: 'Refresh list',
+  btnQuerying: 'Querying…',
   filterSource: 'Source',
   filterAllSources: 'All sources',
   filterRegion: 'Region',
@@ -199,7 +205,7 @@ const en: Messages = {
   resultsErrors: (n) => `${n} source error${n !== 1 ? 's' : ''}`,
   resultsLoading: 'Loading topics…',
   resultsEmptyTitle: 'Nothing here yet',
-  resultsEmptyBody: 'Click Refresh to start collecting. Topics will appear here for you to filter, track, and queue.',
+  resultsEmptyBody: 'Click Collect to start collecting. Topics will appear here for you to filter, track, and queue.',
   rankLabel: 'RANK',
   trendAccum: 'Building trend',
   translateBtn: 'Translate',
@@ -226,7 +232,7 @@ const en: Messages = {
   sectionLanguage: 'Language',
   langZh: '中文',
   langEn: 'English',
-  sectionNetwork: 'Collection network',
+  sectionNetwork: 'Network proxy',
   labelProxy: 'HTTP(S) proxy',
   proxyPlaceholder: 'For example http://127.0.0.1:7897',
   proxyHelp: 'Only restricted international sources use this proxy. Domestic and directly reachable sources remain direct. Leave blank to make every source direct.',
