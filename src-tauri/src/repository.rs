@@ -94,7 +94,16 @@ impl<'connection> TopicRepository<'connection> {
         let limit = query.limit.unwrap_or(20).clamp(1, 100) as i64;
         let offset = query.offset.unwrap_or(0) as i64;
         let mut where_parts = vec!["t.deleted = 0", "p.deleted = 0"];
-        if query.queued_only.unwrap_or(false) {
+        if query.queued_only.unwrap_or(false) && query.recent_only.unwrap_or(false) {
+            return Err(AppError::InvalidInput(
+                "待创作与最近新增不能同时筛选".into(),
+            ));
+        }
+        if query.recent_only.unwrap_or(false) {
+            where_parts.push(
+                "EXISTS (SELECT 1 FROM recent_addition_topic recent WHERE recent.topic_id = t.id)",
+            );
+        } else if query.queued_only.unwrap_or(false) {
             where_parts.push("cq.id IS NOT NULL");
         } else {
             where_parts.push("p.last_success_run_id = t.last_collection_run_id");
@@ -207,14 +216,66 @@ impl<'connection> TopicRepository<'connection> {
             [],
             |row| row.get(0),
         )?;
+        let recent_total: i64 = self.connection.query_row(
+            "SELECT COUNT(DISTINCT recent.topic_id)
+             FROM recent_addition_topic recent
+             JOIN topic t ON t.id = recent.topic_id AND t.deleted = 0
+             JOIN platform p ON p.id = t.platform_id AND p.deleted = 0",
+            [],
+            |row| row.get(0),
+        )?;
 
         Ok(TopicPage {
             topics,
             total,
             queued_total,
+            recent_total,
             statuses: self.statuses()?,
             history_enabled: true,
         })
+    }
+
+    /// Persist one non-empty addition batch and transactionally retain only the newest three.
+    pub fn record_recent_additions(&self, trigger: &str, topic_ids: &[i64]) -> AppResult<()> {
+        let mut unique = topic_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .collect::<Vec<_>>();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO recent_addition_batch (trigger_kind, create_time)
+             VALUES (?, datetime('now', 'localtime'))",
+            [trigger],
+        )?;
+        let batch_id = transaction.last_insert_rowid();
+        for topic_id in unique {
+            transaction.execute(
+                "INSERT INTO recent_addition_topic (batch_id, topic_id, create_time)
+                 SELECT ?, id, datetime('now', 'localtime') FROM topic
+                 WHERE id = ? AND deleted = 0",
+                params![batch_id, topic_id],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM recent_addition_topic WHERE batch_id IN (
+               SELECT id FROM recent_addition_batch ORDER BY id DESC LIMIT -1 OFFSET 3
+             )",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM recent_addition_batch WHERE id IN (
+               SELECT id FROM recent_addition_batch ORDER BY id DESC LIMIT -1 OFFSET 3
+             )",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Idempotently add or remove an existing topic from the creation queue.
@@ -238,14 +299,14 @@ impl<'connection> TopicRepository<'connection> {
         if queued {
             self.connection.execute(
                 "INSERT INTO creation_queue (topic_id, deleted, create_time, update_time)
-                 VALUES (?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 VALUES (?, 0, datetime('now', 'localtime'), datetime('now', 'localtime'))
                  ON CONFLICT(topic_id) DO UPDATE SET deleted = 0,
                    create_time = excluded.create_time, update_time = excluded.update_time",
                 [topic_id],
             )?;
         } else {
             self.connection.execute(
-                "UPDATE creation_queue SET deleted = 1, update_time = CURRENT_TIMESTAMP
+                "UPDATE creation_queue SET deleted = 1, update_time = datetime('now', 'localtime')
                  WHERE topic_id = ? AND deleted = 0",
                 [topic_id],
             )?;
@@ -256,7 +317,7 @@ impl<'connection> TopicRepository<'connection> {
     /// Persist a user's source toggle; catalog synchronization intentionally preserves this value.
     pub fn set_platform_enabled(&self, code: &str, enabled: bool) -> AppResult<()> {
         let changed = self.connection.execute(
-            "UPDATE platform SET enabled = ?, update_time = CURRENT_TIMESTAMP
+            "UPDATE platform SET enabled = ?, update_time = datetime('now', 'localtime')
              WHERE code = ? AND deleted = 0",
             params![enabled, code],
         )?;
@@ -308,9 +369,9 @@ impl<'connection> TopicRepository<'connection> {
         for (key, value) in [("ui_locale", locale.as_str()), ("ui_theme", theme.as_str())] {
             transaction.execute(
                 "INSERT INTO app_setting (key, value, update_time)
-                 VALUES (?, ?, CURRENT_TIMESTAMP)
+                 VALUES (?, ?, datetime('now', 'localtime'))
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                   update_time = CURRENT_TIMESTAMP",
+                   update_time = datetime('now', 'localtime')",
                 params![key, value],
             )?;
         }
@@ -336,9 +397,9 @@ impl<'connection> TopicRepository<'connection> {
         match proxy_url {
             Some(value) => self.connection.execute(
                 "INSERT INTO app_setting (key, value, update_time)
-                 VALUES ('network_proxy_url', ?, CURRENT_TIMESTAMP)
+                 VALUES ('network_proxy_url', ?, datetime('now', 'localtime'))
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                   update_time = CURRENT_TIMESTAMP",
+                   update_time = datetime('now', 'localtime')",
                 [value],
             )?,
             None => self.connection.execute(
@@ -380,20 +441,20 @@ impl<'connection> TopicRepository<'connection> {
         for (key, value) in [("model_endpoint", endpoint), ("model_name", model)] {
             transaction.execute(
                 "INSERT INTO app_setting (key, value, update_time)
-                 VALUES (?, ?, CURRENT_TIMESTAMP)
+                 VALUES (?, ?, datetime('now', 'localtime'))
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                   update_time = CURRENT_TIMESTAMP",
+                   update_time = datetime('now', 'localtime')",
                 params![key, value],
             )?;
         }
         if let Some(api_key) = api_key {
             transaction.execute(
                 "INSERT INTO model_credential
-                   (id, algorithm, nonce, ciphertext, update_time)
-                 VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+                   (id, algorithm, nonce, ciphertext, create_time, update_time)
+                 VALUES (1, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
                  ON CONFLICT(id) DO UPDATE SET algorithm = excluded.algorithm,
                    nonce = excluded.nonce, ciphertext = excluded.ciphertext,
-                   update_time = CURRENT_TIMESTAMP",
+                   update_time = datetime('now', 'localtime')",
                 params![ALGORITHM, api_key.nonce, api_key.ciphertext],
             )?;
         }
@@ -464,8 +525,9 @@ impl<'connection> TopicRepository<'connection> {
     pub fn create_run(&self, platform_id: i64, trigger: &str) -> AppResult<i64> {
         self.connection.execute(
             "INSERT INTO collection_run (
-               platform_id, status, trigger_kind, scheduled_time, start_time, update_time
-             ) VALUES (?, 'running', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+               platform_id, status, trigger_kind, create_time, scheduled_time, start_time, update_time
+             ) VALUES (?, 'running', ?, datetime('now', 'localtime'), datetime('now', 'localtime'),
+                       datetime('now', 'localtime'), datetime('now', 'localtime'))",
             params![platform_id, trigger],
         )?;
         Ok(self.connection.last_insert_rowid())
@@ -474,8 +536,8 @@ impl<'connection> TopicRepository<'connection> {
     /// Mark a failed source without affecting successful results from other sources.
     pub fn fail_run(&self, run_id: i64, message: &str) -> AppResult<()> {
         self.connection.execute(
-            "UPDATE collection_run SET status = 'failed', end_time = CURRENT_TIMESTAMP,
-               error_message = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE collection_run SET status = 'failed', end_time = datetime('now', 'localtime'),
+               error_message = ?, update_time = datetime('now', 'localtime') WHERE id = ?",
             params![message, run_id],
         )?;
         Ok(())
@@ -533,13 +595,13 @@ impl<'connection> TopicRepository<'connection> {
                 if should_repair_legacy_title(&platform.code, &stored_title, &topic.title) {
                     transaction.execute(
                         "UPDATE topic SET title = ?, rank = ?, heat = ?, last_collection_run_id = ?,
-                           deleted = 0, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                           deleted = 0, update_time = datetime('now', 'localtime') WHERE id = ?",
                         params![topic.title, topic.rank, topic.heat, run_id, id],
                     )?;
                 } else {
                     transaction.execute(
                         "UPDATE topic SET rank = ?, heat = ?, last_collection_run_id = ?,
-                           deleted = 0, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+                           deleted = 0, update_time = datetime('now', 'localtime') WHERE id = ?",
                         params![topic.rank, topic.heat, run_id, id],
                     )?;
                 }
@@ -551,7 +613,8 @@ impl<'connection> TopicRepository<'connection> {
                        platform_id, source_key, identity_kind, dedupe_version, dedupe_hash,
                        title, canonical_url, published_time, rank, heat, last_collection_run_id,
                        create_time, update_time
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               datetime('now', 'localtime'), datetime('now', 'localtime'))",
                     params![
                         platform.id,
                         identity.source_key,
@@ -574,18 +637,18 @@ impl<'connection> TopicRepository<'connection> {
             transaction.execute(
                 "INSERT INTO topic_observation (
                    topic_id, collection_run_id, rank, heat, create_time, update_time
-                 ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ) VALUES (?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
                  ON CONFLICT(collection_run_id, topic_id) DO UPDATE SET
                    rank = excluded.rank, heat = excluded.heat, deleted = 0,
-                   update_time = CURRENT_TIMESTAMP",
+                   update_time = datetime('now', 'localtime')",
                 params![topic_id, run_id, topic.rank, topic.heat],
             )?;
         }
 
         transaction.execute(
-            "UPDATE collection_run SET status = 'succeeded', end_time = CURRENT_TIMESTAMP,
+            "UPDATE collection_run SET status = 'succeeded', end_time = datetime('now', 'localtime'),
                fetched_count = ?, inserted_count = ?, updated_count = ?, invalid_count = ?,
-               error_message = NULL, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+               error_message = NULL, update_time = datetime('now', 'localtime') WHERE id = ?",
             params![
                 feed.fetched_count,
                 stats.inserted,
@@ -595,7 +658,7 @@ impl<'connection> TopicRepository<'connection> {
             ],
         )?;
         transaction.execute(
-            "UPDATE platform SET last_success_run_id = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE platform SET last_success_run_id = ?, update_time = datetime('now', 'localtime') WHERE id = ?",
             params![run_id, platform.id],
         )?;
         transaction.commit()?;
@@ -607,11 +670,11 @@ impl<'connection> TopicRepository<'connection> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute_batch(
             "INSERT INTO topic_observation_hourly(topic_id, bucket, rank, heat, sample_count)
-             SELECT topic_id, strftime('%Y-%m-%dT%H:00:00Z', create_time),
+             SELECT topic_id, strftime('%Y-%m-%d %H:00:00', create_time),
                     CAST(ROUND(AVG(rank)) AS INTEGER), AVG(heat), COUNT(*)
              FROM topic_observation
-             WHERE deleted = 0 AND create_time < datetime('now', '-1 day')
-             GROUP BY topic_id, strftime('%Y-%m-%dT%H:00:00Z', create_time)
+             WHERE deleted = 0 AND create_time < datetime('now', 'localtime', '-1 day')
+             GROUP BY topic_id, strftime('%Y-%m-%d %H:00:00', create_time)
              ON CONFLICT(topic_id, bucket) DO UPDATE SET
                rank = excluded.rank, heat = excluded.heat, sample_count = excluded.sample_count;
 
@@ -619,41 +682,47 @@ impl<'connection> TopicRepository<'connection> {
              SELECT topic_id, substr(bucket, 1, 10),
                     CAST(ROUND(AVG(rank)) AS INTEGER), AVG(heat), SUM(sample_count)
              FROM topic_observation_hourly
-             WHERE bucket < strftime('%Y-%m-%dT00:00:00Z', 'now', '-14 days')
+             WHERE bucket < strftime('%Y-%m-%d 00:00:00', 'now', 'localtime', '-14 days')
              GROUP BY topic_id, substr(bucket, 1, 10)
              ON CONFLICT(topic_id, bucket) DO UPDATE SET
                rank = excluded.rank, heat = excluded.heat, sample_count = excluded.sample_count;
 
-             DELETE FROM topic_observation WHERE create_time < datetime('now', '-14 days');
-             DELETE FROM topic_observation_hourly WHERE bucket < strftime('%Y-%m-%dT00:00:00Z', 'now', '-90 days');
-             DELETE FROM topic_observation_daily WHERE bucket < date('now', '-365 days');
+             DELETE FROM topic_observation WHERE create_time < datetime('now', 'localtime', '-14 days');
+             DELETE FROM topic_observation_hourly WHERE bucket < strftime('%Y-%m-%d 00:00:00', 'now', 'localtime', '-90 days');
+             DELETE FROM topic_observation_daily WHERE bucket < date('now', 'localtime', '-365 days');
 
              DELETE FROM collection_run
              WHERE id NOT IN (SELECT last_success_run_id FROM platform WHERE last_success_run_id IS NOT NULL)
-               AND ((status = 'succeeded' AND create_time < datetime('now', '-30 days'))
-                 OR (status <> 'succeeded' AND create_time < datetime('now', '-90 days')));
+               AND ((status = 'succeeded' AND create_time < datetime('now', 'localtime', '-30 days'))
+                 OR (status <> 'succeeded' AND create_time < datetime('now', 'localtime', '-90 days')));
 
-             DELETE FROM creation_queue WHERE deleted <> 0 AND update_time < datetime('now', '-30 days');
+             DELETE FROM creation_queue WHERE deleted <> 0 AND update_time < datetime('now', 'localtime', '-30 days');
 
              DELETE FROM topic_observation_hourly WHERE topic_id IN (
                SELECT t.id FROM topic t
                LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
                JOIN platform p ON p.id = t.platform_id
-               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+               WHERE q.id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM recent_addition_topic recent WHERE recent.topic_id = t.id)
+                 AND t.update_time < datetime('now', 'localtime', '-180 days')
                  AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
              );
              DELETE FROM topic_observation_daily WHERE topic_id IN (
                SELECT t.id FROM topic t
                LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
                JOIN platform p ON p.id = t.platform_id
-               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+               WHERE q.id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM recent_addition_topic recent WHERE recent.topic_id = t.id)
+                 AND t.update_time < datetime('now', 'localtime', '-180 days')
                  AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
              );
              DELETE FROM topic WHERE id IN (
                SELECT t.id FROM topic t
                LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
                JOIN platform p ON p.id = t.platform_id
-               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+               WHERE q.id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM recent_addition_topic recent WHERE recent.topic_id = t.id)
+                 AND t.update_time < datetime('now', 'localtime', '-180 days')
                  AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
              );",
         )?;
@@ -941,6 +1010,61 @@ mod tests {
         assert_eq!(searched.total, 1);
     }
 
+    /// A fourth non-empty collection batch evicts only the oldest recent-addition batch.
+    #[test]
+    fn retains_three_recent_addition_batches() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let mut inserted_ids = Vec::new();
+        for batch in 1..=4 {
+            let run_id = repository.create_run(platform.id, "test").unwrap();
+            let stats = repository
+                .commit_feed(
+                    &platform,
+                    run_id,
+                    &ParsedFeed {
+                        topics: vec![CollectedTopic {
+                            platform_code: "qbitai".into(),
+                            stable_id: Some(format!("recent-{batch}")),
+                            title: format!("最近新增 {batch}"),
+                            url: format!("https://www.qbitai.com/recent-{batch}"),
+                            published_time: None,
+                            rank: 1,
+                            heat: None,
+                        }],
+                        fetched_count: 1,
+                        invalid_count: 0,
+                    },
+                )
+                .unwrap();
+            repository
+                .record_recent_additions("test", &stats.inserted_topic_ids)
+                .unwrap();
+            inserted_ids.extend(stats.inserted_topic_ids);
+        }
+
+        let recent = repository
+            .list(&TopicQuery {
+                recent_only: Some(true),
+                limit: Some(100),
+                ..TopicQuery::default()
+            })
+            .unwrap();
+        assert_eq!(recent.total, 3);
+        assert_eq!(recent.recent_total, 3);
+        assert!(!recent
+            .topics
+            .iter()
+            .any(|topic| topic.id == inserted_ids[0]));
+        let batch_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM recent_addition_batch", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(batch_count, 3);
+    }
+
     /// Maintenance rolls old raw observations up before applying retention windows.
     #[test]
     fn rolls_up_and_prunes_operational_history() {
@@ -1089,7 +1213,9 @@ mod tests {
 
         assert_eq!(
             repository.network_settings().expect("settings should load"),
-            NetworkSettings { proxy_url: None }
+            NetworkSettings {
+                proxy_url: Some("http://127.0.0.1:7897".into())
+            }
         );
         repository
             .save_network_settings(Some("http://127.0.0.1:7897"))

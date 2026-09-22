@@ -57,6 +57,7 @@ pub fn run() {
             });
 
             // A detached scheduler keeps desktop refreshes independent from WebView visibility.
+            let event_app = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(5));
                 let mut trigger = "startup";
@@ -65,8 +66,37 @@ pub fn run() {
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                     {
-                        let _ = collector::collect_all(&database_path, trigger);
+                        commands::emit_collection_status(
+                            &event_app,
+                            "started",
+                            trigger,
+                            "正在自动采集数据…".into(),
+                            0,
+                            0,
+                        );
+                        let result = collector::collect_all(&database_path, trigger);
                         refreshing.store(false, Ordering::Release);
+                        match result {
+                            Ok(stats) => commands::emit_collection_status(
+                                &event_app,
+                                "finished",
+                                trigger,
+                                format!(
+                                    "自动采集完成：新增 {}，更新 {}",
+                                    stats.inserted, stats.updated
+                                ),
+                                stats.inserted,
+                                stats.updated,
+                            ),
+                            Err(error) => commands::emit_collection_status(
+                                &event_app,
+                                "failed",
+                                trigger,
+                                error.to_string(),
+                                0,
+                                0,
+                            ),
+                        }
                     }
                     trigger = "schedule";
                     std::thread::sleep(Duration::from_secs(10 * 60));

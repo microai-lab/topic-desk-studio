@@ -286,9 +286,9 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
     setDropTarget(null)
   }
 
-  /** Pointer capture is required for a reliable drag on macOS WebKit, but it
-   * also makes event targets unreliable. Resolve the insertion point from the
-   * pointer coordinates and the rendered tab geometry instead. */
+  /** Pointer capture keeps an active drag reliable on macOS WebKit. It must
+   * start only after the movement threshold, because capturing on pointer-down
+   * can retarget the synthesized click away from the tab button. */
   const locateTabDropTarget = (clientX: number, clientY: number, draggedId: string): { id: string; after: boolean } | null => {
     const strip = tabStrip.current
     if (!strip) return null
@@ -341,12 +341,12 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
             onPointerDown={(event) => {
               if (event.button !== 0 || (event.target instanceof Element && event.target.closest('.browser-tab-close'))) return
               tabDrag.current = { id: tab.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false }
-              event.currentTarget.setPointerCapture(event.pointerId)
             }}
             onPointerMove={(event) => {
               const drag = tabDrag.current
               if (!drag || drag.pointerId !== event.pointerId) return
               if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return
+              if (!drag.moved) event.currentTarget.setPointerCapture(event.pointerId)
               drag.moved = true
               event.preventDefault()
               setDraggingTabId(drag.id)

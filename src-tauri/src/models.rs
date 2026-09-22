@@ -39,6 +39,7 @@ pub struct TopicQuery {
     pub search: Option<String>,
     pub sort: Option<TopicSort>,
     pub queued_only: Option<bool>,
+    pub recent_only: Option<bool>,
     pub topic_ids: Option<Vec<i64>>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
@@ -89,8 +90,20 @@ pub struct TopicPage {
     pub topics: Vec<TopicView>,
     pub total: i64,
     pub queued_total: i64,
+    pub recent_total: i64,
     pub statuses: Vec<PlatformStatusView>,
     pub history_enabled: bool,
+}
+
+/// Native collection lifecycle event used by the desktop button and list refresh.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionStatusEvent {
+    pub phase: String,
+    pub trigger: String,
+    pub message: String,
+    pub inserted: u32,
+    pub updated: u32,
 }
 
 /// Summary returned after a controlled collection request.

@@ -16,3 +16,10 @@ export function rankTrendPoints(values: readonly number[]): string {
     return `${x},${y}`
   }).join(' ')
 }
+
+/** Parse timezone-less SQLite text as device-local time; explicit source offsets remain authoritative. */
+export function parseStoredTimestamp(value: string): Date {
+  const trimmed = value.trim()
+  const sqliteLocal = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)
+  return new Date(sqliteLocal ? trimmed.replace(' ', 'T') : trimmed)
+}

@@ -46,6 +46,7 @@ export interface TopicQuery {
   readonly search?: string
   readonly sort?: TopicSort
   readonly queuedOnly?: boolean
+  readonly recentOnly?: boolean
   readonly topicIds?: number[]
   readonly limit?: number
   readonly offset?: number
@@ -56,8 +57,18 @@ export interface TopicPage {
   readonly topics: TopicView[]
   readonly total: number
   readonly queuedTotal: number
+  readonly recentTotal: number
   readonly statuses: PlatformStatusView[]
   readonly historyEnabled: boolean
+}
+
+/** Native lifecycle notification shared by manual and scheduled collection runs. */
+export interface CollectionStatusEvent {
+  readonly phase: 'started' | 'finished' | 'failed'
+  readonly trigger: 'manual' | 'startup' | 'schedule' | string
+  readonly message: string
+  readonly inserted: number
+  readonly updated: number
 }
 
 /** 手动刷新结果；后续进度细节通过 Tauri events 推送。 */

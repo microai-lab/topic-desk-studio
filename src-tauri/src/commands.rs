@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use serde::Deserialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::collector;
 use crate::credential_cipher::{CredentialCipher, MASTER_KEY_FILE};
 use crate::error::AppError;
 use crate::models::{
-    ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings,
-    SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage, TopicQuery,
-    TranslationResult, UiPreferences,
+    CollectionStatusEvent, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings,
+    SaveNetworkSettings, SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage,
+    TopicQuery, TranslationResult, UiPreferences,
 };
 use crate::repository::TopicRepository;
 use crate::translator;
@@ -25,6 +25,28 @@ pub struct AppState {
     pub database: Mutex<Connection>,
     pub database_path: PathBuf,
     pub refreshing: Arc<AtomicBool>,
+}
+
+/// Notify the trusted desktop shell about native collection work, including scheduler runs.
+pub fn emit_collection_status(
+    app: &tauri::AppHandle,
+    phase: &str,
+    trigger: &str,
+    message: String,
+    inserted: u32,
+    updated: u32,
+) {
+    let _ = app.emit_to(
+        "main",
+        "collection-status",
+        CollectionStatusEvent {
+            phase: phase.into(),
+            trigger: trigger.into(),
+            message,
+            inserted,
+            updated,
+        },
+    );
 }
 
 /// Minimal untrusted card payload extracted from the rendered Xiaohongshu DOM.
@@ -321,7 +343,10 @@ pub async fn translate_topic(
 
 /// Run the native collector off the UI thread while enforcing one process-wide refresh.
 #[tauri::command]
-pub async fn refresh_topics(state: State<'_, AppState>) -> Result<RefreshResult, String> {
+pub async fn refresh_topics(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RefreshResult, String> {
     if state
         .refreshing
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -336,11 +361,26 @@ pub async fn refresh_topics(state: State<'_, AppState>) -> Result<RefreshResult,
         });
     }
 
+    emit_collection_status(&app, "started", "manual", "正在采集数据…".into(), 0, 0);
     let database_path = state.database_path.clone();
     let refreshing = Arc::clone(&state.refreshing);
+    let event_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let result = collector::collect_all(&database_path, "manual");
         refreshing.store(false, Ordering::Release);
+        match &result {
+            Ok(stats) => emit_collection_status(
+                &event_app,
+                "finished",
+                "manual",
+                format!("采集完成：新增 {}，更新 {}", stats.inserted, stats.updated),
+                stats.inserted,
+                stats.updated,
+            ),
+            Err(error) => {
+                emit_collection_status(&event_app, "failed", "manual", error.to_string(), 0, 0)
+            }
+        }
         result
     })
     .await
@@ -456,7 +496,10 @@ pub async fn collect_xiaohongshu_session(
             .ok_or_else(|| AppError::InvalidInput("小红书来源未启用".into()))?;
         let run_id = repository.create_run(platform.id, "browser-session")?;
         match repository.commit_feed(&platform, run_id, &feed) {
-            Ok(stats) => Ok(stats),
+            Ok(stats) => {
+                repository.record_recent_additions("browser-session", &stats.inserted_topic_ids)?;
+                Ok(stats)
+            }
             Err(error) => {
                 let _ = repository.fail_run(run_id, &error.to_string());
                 Err(error)

@@ -116,6 +116,7 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
                 }
             }
         }
+        repository.record_recent_additions(trigger, &totals.inserted_topic_ids)?;
         repository.maintain_storage()?;
         Ok(totals)
     })

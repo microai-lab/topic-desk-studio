@@ -1,5 +1,6 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, FolderOpen, HardDrive, Network, PanelRight, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Wrench } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -10,23 +11,24 @@ import {
 } from './api'
 import { BrowserPane } from './BrowserPane'
 import type { BrowserTab } from './BrowserPane'
-import { isEnglishTitle, rankTrendPoints } from './presentation'
+import { isEnglishTitle, parseStoredTimestamp, rankTrendPoints } from './presentation'
 import {
   Locale, Theme, Messages, messages,
   detectLocale, detectTheme, applyTheme,
 } from './i18n'
-import type { ModelSettings, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
+import type { CollectionStatusEvent, ModelSettings, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
 
 const PAGE_SIZE = 20
 type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
 type SettingsTab = 'general' | 'network' | 'sources' | 'model' | 'storage'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
+interface NoticeState { readonly scope: 'workspace' | 'network' | 'model' | 'storage'; readonly text: string }
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
-  }).format(new Date(value))
+  }).format(parseStoredTimestamp(value))
 }
 
 function formatBytes(value: number): string {
@@ -192,10 +194,9 @@ export function App() {
 
   // ── Data state ──────────────────────────────────────────────────
   const [page,              setPage]              = useState<TopicPage>()
-  const [insertedTopicIds,  setInsertedTopicIds]  = useState<number[]>([])
   const [loading,           setLoading]           = useState(true)
   const [refreshing,        setRefreshing]        = useState(false)
-  const [notice,            setNotice]            = useState<string>()
+  const [notice,            setNotice]            = useState<NoticeState>()
   const [error,             setError]             = useState<string>()
   const [translations,      setTranslations]      = useState<Record<number, TranslationState>>({})
 
@@ -280,17 +281,30 @@ export function App() {
         || (tab.sourceUrl !== undefined && normalizedArticleUrl(tab.sourceUrl) === topicUrl)
         || (tab.url !== '' && normalizedArticleUrl(tab.url) === topicUrl)
       ))
-      // Each distinct topic owns one tab; repeat clicks only activate it.
-      const targetId = existing?.id ?? newId
+      // Reuse the active unpinned blank tab created by the browser toggle. Each
+      // distinct topic otherwise owns one tab, and repeat clicks only activate it.
+      const reusable = existing === undefined
+        ? currentTabs.find((tab) => (
+            tab.id === activeBrowserTabIdRef.current
+            && tab.url === ''
+            && tab.topicId === undefined
+            && tab.sourceUrl === undefined
+            && tab.pinned !== true
+          ))
+        : undefined
+      const targetId = existing?.id ?? reusable?.id ?? newId
+      const topicTab: BrowserTab = {
+        id: targetId,
+        url: topic.url,
+        title: topic.title,
+        topicId: topic.id,
+        sourceUrl: topic.url,
+      }
       const next = existing
         ? currentTabs
-        : [...currentTabs, {
-            id: newId,
-            url: topic.url,
-            title: topic.title,
-            topicId: topic.id,
-            sourceUrl: topic.url,
-          }]
+        : reusable
+          ? currentTabs.map((tab) => tab.id === reusable.id ? topicTab : tab)
+          : [...currentTabs, topicTab]
       browserTabsRef.current = next
       topicKeys.forEach((key) => topicTabIdsRef.current.set(key, targetId))
       activeBrowserTabIdRef.current = targetId
@@ -309,7 +323,6 @@ export function App() {
 
   const collectXiaohongshu = async (tabId: string): Promise<string> => {
     const result = await collectXiaohongshuSession(tabId)
-    setInsertedTopicIds(result.insertedTopicIds)
     await load()
     return result.message
   }
@@ -371,13 +384,13 @@ export function App() {
   // ── Query ────────────────────────────────────────────────────────
   const query = useMemo<TopicQuery>(() => ({
     ...(view === 'queue' ? { queuedOnly: true } : {}),
-    ...(view === 'new'   ? { topicIds: insertedTopicIds } : {}),
+    ...(view === 'new'   ? { recentOnly: true } : {}),
     ...(source   === 'all' ? {} : { source }),
     ...(region   === 'all' ? {} : { region }),
     ...(category === 'all' ? {} : { category }),
     ...(search.trim() === '' ? {} : { search: search.trim() }),
     sort, limit: PAGE_SIZE, offset: pageIndex * PAGE_SIZE,
-  }), [category, insertedTopicIds, pageIndex, region, search, sort, source, view])
+  }), [category, pageIndex, region, search, sort, source, view])
 
   // ── Data loading ─────────────────────────────────────────────────
   const querySequence = useRef(0)
@@ -406,6 +419,30 @@ export function App() {
   }, [load])
 
   useEffect(() => {
+    let disposed = false
+    const unlisten = listen<CollectionStatusEvent>('collection-status', ({ payload }) => {
+      if (disposed) return
+      if (payload.phase === 'started') {
+        setRefreshing(true)
+        setError(undefined)
+        setNotice({ scope: 'workspace', text: payload.message })
+        return
+      }
+      setRefreshing(false)
+      if (payload.phase === 'finished') {
+        setNotice({ scope: 'workspace', text: payload.message })
+        void load(true)
+      } else {
+        setError(payload.message)
+      }
+    })
+    return () => {
+      disposed = true
+      void unlisten.then((stop) => stop()).catch(() => {})
+    }
+  }, [load])
+
+  useEffect(() => {
     if (view !== 'settings') return
     void getModelSettings().then((s) => {
       setModelSettingsState(s)
@@ -423,8 +460,7 @@ export function App() {
     setRefreshing(true); setError(undefined); setNotice(undefined)
     try {
       const result = await refreshTopics()
-      setNotice(result.message)
-      setInsertedTopicIds(result.insertedTopicIds)
+      setNotice({ scope: 'workspace', text: result.message })
       if (result.insertedTopicIds.length > 0) { setView('new'); setPageIndex(0) }
       // Manual refresh is a network collection followed by an immediate local query.
       await load(true)
@@ -461,7 +497,7 @@ export function App() {
         endpoint: modelEndpoint, model: modelName,
         ...(apiKey.trim() === '' ? {} : { apiKey: apiKey.trim() }),
       })
-      setModelSettingsState(s); setApiKey(''); setNotice(m.saveNotice)
+      setModelSettingsState(s); setApiKey(''); setNotice({ scope: 'model', text: m.saveNotice })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally { setSavingSettings(false) }
@@ -472,7 +508,7 @@ export function App() {
     try {
       const settings = await saveNetworkSettings({ proxyUrl })
       setProxyUrl(settings.proxyUrl ?? '')
-      setNotice(m.networkSaveNotice)
+      setNotice({ scope: 'network', text: m.networkSaveNotice })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally { setSavingNetwork(false) }
@@ -487,7 +523,7 @@ export function App() {
         : action === 'restore'
           ? await restoreLatestBackup()
           : await optimizeStorage()
-      setNotice(result.message)
+      setNotice({ scope: 'storage', text: result.message })
       setStorageStatus(await getStorageStatus())
       if (action === 'restore') await load(true)
     } catch (reason) {
@@ -499,6 +535,7 @@ export function App() {
     if (next === 'settings' && view !== 'settings') {
       setPrevView(view as Exclude<ViewMode, 'settings'>)
     }
+    setNotice(undefined); setError(undefined)
     setView(next); setPageIndex(0)
   }
 
@@ -538,7 +575,7 @@ export function App() {
                 <button
                   key={tab}
                   className={settingsTab === tab ? 'settings-tab active' : 'settings-tab'}
-                  onClick={() => setSettingsTab(tab)}
+                  onClick={() => { setSettingsTab(tab); setNotice(undefined); setError(undefined) }}
                 >
                   <TabIcon className="settings-tab-icon" aria-hidden="true" />
                   {tabLabels[tab]}
@@ -607,6 +644,8 @@ export function App() {
                     />
                   </label>
                   <p>{m.proxyHelp}</p>
+                  {notice?.scope === 'network' ? <div className="notice">{notice.text}</div> : null}
+                  {error !== undefined ? <div className="error-banner">{error}</div> : null}
                   <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
                     {savingNetwork ? m.btnSaving : m.btnSave}
                   </button>
@@ -662,7 +701,7 @@ export function App() {
                     </dl>
                   </>
                 ) : null}
-                {notice !== undefined ? <div className="notice">{notice}</div> : null}
+                {notice?.scope === 'storage' ? <div className="notice">{notice.text}</div> : null}
                 {error !== undefined ? <div className="error-banner">{error}</div> : null}
                 <div className="storage-actions">
                   <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
@@ -698,7 +737,7 @@ export function App() {
                     autoComplete="off"
                   />
                 </label>
-                {notice !== undefined ? <div className="notice">{notice}</div> : null}
+                {notice?.scope === 'model' ? <div className="notice">{notice.text}</div> : null}
                 {error  !== undefined ? <div className="error-banner">{error}</div> : null}
                 <button className="primary-button settings-save" type="button" disabled={savingSettings} onClick={() => void saveSettings()}>
                   {savingSettings ? m.btnSaving : m.btnSave}
@@ -733,7 +772,7 @@ export function App() {
             <Bookmark aria-hidden="true" />{m.navQueue} <small>{page?.queuedTotal ?? 0}</small>
           </button>
           <button className={view === 'new' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('new')}>
-            <Sparkles aria-hidden="true" />{m.navNew} <small>{insertedTopicIds.length}</small>
+            <Sparkles aria-hidden="true" />{m.navNew} <small>{page?.recentTotal ?? 0}</small>
           </button>
         </nav>
 
@@ -763,7 +802,7 @@ export function App() {
             <button className={`query-button topbar-icon-button${loading ? ' busy' : ''}`} type="button" disabled={loading || refreshing} aria-label={loading ? m.btnQuerying : m.btnQuery} title={loading ? m.btnQuerying : m.btnQuery} onClick={() => void load()}>
               <RefreshCw aria-hidden="true" />
             </button>
-            <button className={`primary-button topbar-icon-button${refreshing ? ' busy' : ''}`} type="button" disabled={refreshing} aria-label={refreshing ? m.btnRefreshing : m.btnRefresh} title={refreshing ? m.btnRefreshing : m.btnRefresh} onClick={() => void collect()}>
+            <button className={`primary-button topbar-icon-button collect-button${refreshing ? ' busy' : ''}`} type="button" disabled={refreshing} aria-label={refreshing ? m.btnRefreshing : m.btnRefresh} title={refreshing ? m.btnRefreshing : m.btnRefresh} onClick={() => void collect()}>
               <Radar aria-hidden="true" />
             </button>
             <button className={`side-panel-toggle topbar-icon-button${browserOpen ? ' active' : ''}`} type="button" aria-label={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} aria-pressed={browserOpen} title={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} onClick={toggleBrowser}><PanelRight aria-hidden="true" /></button>
@@ -815,7 +854,7 @@ export function App() {
           </div>
         </div>
 
-        {notice !== undefined ? <div className="notice">{notice}</div> : null}
+        {notice?.scope === 'workspace' ? <div className="notice">{notice.text}</div> : null}
         {error  !== undefined ? <div className="error-banner">{error}</div> : null}
 
         <section className="results" aria-live="polite">

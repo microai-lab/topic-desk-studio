@@ -1,9 +1,9 @@
--- Topic Desk Studio SQLite schema version 7, compatible with dsh-topic-desk data exports.
+-- Topic Desk Studio SQLite schema version 10, compatible with dsh-topic-desk data exports.
 CREATE TABLE platform (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   code TEXT NOT NULL,
   display_name TEXT NOT NULL,
   home_url TEXT NOT NULL,
@@ -17,8 +17,8 @@ CREATE TABLE platform (
 CREATE TABLE collection_run (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   platform_id INTEGER NOT NULL,
   status TEXT NOT NULL,
   trigger_kind TEXT NOT NULL,
@@ -36,8 +36,8 @@ CREATE TABLE collection_run (
 CREATE TABLE topic (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   platform_id INTEGER NOT NULL,
   source_key TEXT NOT NULL,
   identity_kind TEXT NOT NULL,
@@ -56,8 +56,8 @@ CREATE TABLE topic (
 CREATE TABLE topic_observation (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   topic_id INTEGER NOT NULL,
   collection_run_id INTEGER NOT NULL,
   rank INTEGER NOT NULL,
@@ -84,12 +84,26 @@ CREATE TABLE topic_observation_daily (
   PRIMARY KEY (topic_id, bucket)
 );
 
+-- Recent additions retain only the newest three non-empty collection batches.
+CREATE TABLE recent_addition_batch (
+  id INTEGER PRIMARY KEY,
+  trigger_kind TEXT NOT NULL,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE recent_addition_topic (
+  batch_id INTEGER NOT NULL,
+  topic_id INTEGER NOT NULL,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  PRIMARY KEY (batch_id, topic_id)
+);
+
 -- Creation queue survives a topic dropping from the current source board.
 CREATE TABLE creation_queue (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   topic_id INTEGER NOT NULL,
   UNIQUE (topic_id)
 );
@@ -98,8 +112,12 @@ CREATE TABLE creation_queue (
 CREATE TABLE app_setting (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+
+-- Restricted international sources use the common local proxy by default.
+INSERT INTO app_setting (key, value)
+VALUES ('network_proxy_url', 'http://127.0.0.1:7897');
 
 -- The single configured model credential stays in the local application database.
 -- Rust never returns this value to the WebView.
@@ -108,8 +126,8 @@ CREATE TABLE model_credential (
   algorithm TEXT NOT NULL CHECK (algorithm = 'AES-256-GCM-file-v1'),
   nonce BLOB NOT NULL CHECK (length(nonce) = 12),
   ciphertext BLOB NOT NULL CHECK (length(ciphertext) > 16),
-  create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+  update_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
 -- Trigram FTS keeps substring title search fast as the local topic archive grows.
@@ -141,5 +159,6 @@ CREATE INDEX idx_observation_create_time ON topic_observation (create_time, id);
 CREATE INDEX idx_observation_run_topic ON topic_observation (collection_run_id, topic_id, deleted);
 CREATE INDEX idx_collection_run_platform_status_end ON collection_run (platform_id, status, end_time DESC, id DESC);
 CREATE INDEX idx_creation_queue_active_time ON creation_queue (deleted, create_time DESC, id DESC);
+CREATE INDEX idx_recent_addition_topic_id ON recent_addition_topic (topic_id, batch_id DESC);
 
-PRAGMA user_version = 7;
+PRAGMA user_version = 10;

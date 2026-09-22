@@ -10,7 +10,8 @@ use crate::catalog::PLATFORM_CATALOG;
 use crate::credential_cipher::{CredentialCipher, EncryptedCredential, ALGORITHM, MASTER_KEY_FILE};
 use crate::error::{AppError, AppResult};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 10;
+const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:7897";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 
 /// Open the application database and migrate compatible older schemas transactionally.
@@ -76,10 +77,12 @@ fn backup_before_migration(connection: &Connection, path: &Path, version: i64) -
 /// Seed catalog metadata without overwriting future user choices such as enabled state or feed URL.
 fn ensure_platforms(connection: &Connection) -> AppResult<()> {
     let mut statement = connection.prepare(
-        "INSERT INTO platform (code, display_name, home_url, feed_url, enabled, update_time)
-         VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        "INSERT INTO platform (
+           code, display_name, home_url, feed_url, enabled, create_time, update_time
+         ) VALUES (?, ?, ?, ?, 1, datetime('now', 'localtime'), datetime('now', 'localtime'))
          ON CONFLICT(code) DO UPDATE SET display_name = excluded.display_name,
-           home_url = excluded.home_url, deleted = 0, update_time = CURRENT_TIMESTAMP",
+           home_url = excluded.home_url, deleted = 0,
+           update_time = datetime('now', 'localtime')",
     )?;
     for platform in PLATFORM_CATALOG {
         statement.execute((
@@ -119,29 +122,160 @@ fn initialize(connection: &mut Connection, master_key_path: &Path) -> AppResult<
         }
         1 => {
             migrate_from_v1(connection)?;
-            migrate_from_v6(connection)
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
         }
         2 => {
             migrate_from_v2(connection)?;
-            migrate_from_v6(connection)
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
         }
         3 => {
             migrate_from_v3(connection)?;
-            migrate_from_v6(connection)
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
         }
         4 => {
             migrate_from_v4(connection, master_key_path)?;
-            migrate_from_v6(connection)
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
         }
         5 => {
             migrate_from_v5(connection)?;
-            migrate_from_v6(connection)
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
         }
-        6 => migrate_from_v6(connection),
+        6 => {
+            migrate_from_v6(connection)?;
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
+        }
+        7 => {
+            migrate_from_v7(connection)?;
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
+        }
+        8 => {
+            migrate_from_v8(connection)?;
+            migrate_from_v9(connection)
+        }
+        9 => migrate_from_v9(connection),
         unsupported => Err(AppError::Initialization(format!(
             "不支持的 Topic Desk 数据库版本：{unsupported}"
         ))),
     }
+}
+
+/// Version 10 persists the newest three non-empty addition batches across launches.
+fn migrate_from_v9(connection: &mut Connection) -> AppResult<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE recent_addition_batch (
+           id INTEGER PRIMARY KEY,
+           trigger_kind TEXT NOT NULL,
+           create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+         );
+         CREATE TABLE recent_addition_topic (
+           batch_id INTEGER NOT NULL,
+           topic_id INTEGER NOT NULL,
+           create_time TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+           PRIMARY KEY (batch_id, topic_id)
+         );
+         CREATE INDEX idx_recent_addition_topic_id
+           ON recent_addition_topic (topic_id, batch_id DESC);
+         PRAGMA user_version = 10;
+         COMMIT;",
+    )?;
+    Ok(())
+}
+
+/// Version 9 seeds a practical loopback proxy once. Deleting the setting later
+/// remains an explicit all-direct choice and does not recreate the default.
+fn migrate_from_v8(connection: &mut Connection) -> AppResult<()> {
+    let transaction = connection.transaction()?;
+    let settings_table: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_setting'",
+        [],
+        |row| row.get(0),
+    )?;
+    if settings_table != 0 {
+        transaction.execute(
+            "INSERT OR IGNORE INTO app_setting (key, value, update_time)
+             VALUES ('network_proxy_url', ?, datetime('now', 'localtime'))",
+            [DEFAULT_PROXY_URL],
+        )?;
+    }
+    transaction.pragma_update(None, "user_version", 9_i64)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Version 8 makes application-owned timestamps device-local. Source-provided
+/// publication timestamps remain untouched because their offsets are authoritative.
+fn migrate_from_v7(connection: &mut Connection) -> AppResult<()> {
+    let transaction = connection.transaction()?;
+    for (table, columns) in [
+        ("platform", &["create_time", "update_time"][..]),
+        (
+            "collection_run",
+            &[
+                "create_time",
+                "update_time",
+                "scheduled_time",
+                "start_time",
+                "end_time",
+            ][..],
+        ),
+        ("topic", &["create_time", "update_time"][..]),
+        ("topic_observation", &["create_time", "update_time"][..]),
+        ("creation_queue", &["create_time", "update_time"][..]),
+        ("app_setting", &["update_time"][..]),
+        ("model_credential", &["create_time", "update_time"][..]),
+    ] {
+        localize_timestamp_columns(&transaction, table, columns)?;
+    }
+    transaction.execute("DELETE FROM topic_observation_hourly", [])?;
+    transaction.execute("DELETE FROM topic_observation_daily", [])?;
+    transaction.pragma_update(None, "user_version", 8_i64)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Convert only columns present in the source schema so every supported legacy
+/// version can pass through the local-time migration transactionally.
+fn localize_timestamp_columns(
+    connection: &Connection,
+    table: &str,
+    columns: &[&str],
+) -> AppResult<()> {
+    let mut assignments = Vec::new();
+    for column in columns {
+        let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?");
+        let exists: i64 = connection.query_row(&sql, [column], |row| row.get(0))?;
+        if exists != 0 {
+            assignments.push(format!(
+                "{column} = CASE WHEN {column} IS NULL THEN NULL ELSE datetime({column}, 'localtime') END"
+            ));
+        }
+    }
+    if !assignments.is_empty() {
+        connection.execute(
+            &format!("UPDATE {table} SET {}", assignments.join(", ")),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 /// Version 7 adds bounded trend rollups and indexed title search without foreign keys.

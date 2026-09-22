@@ -256,6 +256,8 @@ h1 {
 .query-button.topbar-icon-button { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); }
 .query-button.topbar-icon-button:hover { color: var(--accent-h); border-color: color-mix(in srgb, var(--accent) 46%, var(--border)); }
 .primary-button.topbar-icon-button { color: color-mix(in srgb, white 96%, var(--accent-dim)); }
+.collect-button { position: relative; }
+.collect-button.busy::after { content: ''; position: absolute; inset: -4px; border: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 12px; animation: collect-pulse 1.15s ease-out infinite; pointer-events: none; }
 .side-panel-toggle { border: 1px solid var(--border); background: var(--surface); color: color-mix(in srgb, var(--accent) 42%, var(--muted)); cursor: pointer; }
 .side-panel-toggle:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 34%, var(--border)); background: var(--surface-2); }
 .side-panel-toggle.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--accent-dim); }
@@ -438,6 +440,7 @@ h1 {
 .empty-glyph svg { width: 28px; height: 28px; stroke-width: 1.6; }
 .loader { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes collect-pulse { from { opacity: .8; transform: scale(.82); } to { opacity: 0; transform: scale(1.18); } }
 
 /* ─── Pagination ─────────────────────────────────────────────────── */
 .pagination {
@@ -846,6 +849,6 @@ h1 {
 .browser-check input { accent-color: var(--accent); }
 .browser-setting { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin: 20px 0; font-size: 13px; }
 @media (max-width: 1200px) { .browser-toolbar { gap: 1px; padding-left: 6px; padding-right: 6px; } .browser-toolbar .browser-icon-button { width: 28px; } }
-@media (prefers-reduced-motion: reduce) { .browser-loading-line, .is-loading svg, .topbar-icon-button.busy svg { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .browser-loading-line, .is-loading svg, .topbar-icon-button.busy svg, .collect-button.busy::after { animation: none; } }
 .browser-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
 .menu-overlay { background: transparent; }
