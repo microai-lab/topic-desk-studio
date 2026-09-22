@@ -116,7 +116,7 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
                 }
             }
         }
-        repository.clean_observations(30)?;
+        repository.maintain_storage()?;
         Ok(totals)
     })
 }

@@ -1,6 +1,6 @@
 /** 类型化 Tauri command 客户端，集中隔离前端与原生层通信细节。 */
 import { invoke } from '@tauri-apps/api/core'
-import type { ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveUiPreferences, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
+import type { ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
 
 /** 查询本地 SQLite 中的当前话题。 */
 export async function listTopics(query: TopicQuery): Promise<TopicPage> {
@@ -55,6 +55,31 @@ export async function getNetworkSettings(): Promise<NetworkSettings> {
 /** Validate and persist an HTTP(S) proxy for future collection runs. */
 export async function saveNetworkSettings(settings: SaveNetworkSettings): Promise<NetworkSettings> {
   return invoke<NetworkSettings>('save_network_settings', { settings })
+}
+
+/** Read aggregate database size, record counts, integrity and backup state. */
+export async function getStorageStatus(): Promise<StorageStatus> {
+  return invoke<StorageStatus>('get_storage_status')
+}
+
+/** Snapshot both SQLite databases and the optional credential key. */
+export async function backupStorage(): Promise<StorageOperationResult> {
+  return invoke<StorageOperationResult>('backup_storage')
+}
+
+/** Restore the newest snapshot created by this application. */
+export async function restoreLatestBackup(): Promise<StorageOperationResult> {
+  return invoke<StorageOperationResult>('restore_latest_backup')
+}
+
+/** Apply retention rules, optimize indexes and checkpoint WAL files. */
+export async function optimizeStorage(): Promise<StorageOperationResult> {
+  return invoke<StorageOperationResult>('optimize_storage')
+}
+
+/** Reveal the private application data folder in the system file manager. */
+export async function openDataDirectory(): Promise<void> {
+  await invoke('open_data_directory')
 }
 
 /** Translate the trusted database title for one topic through the configured model. */

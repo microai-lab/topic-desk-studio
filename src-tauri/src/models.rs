@@ -226,6 +226,29 @@ pub struct SaveNetworkSettings {
     pub proxy_url: String,
 }
 
+/// Local storage health and bounded-retention counters shown in settings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatus {
+    pub data_directory: String,
+    pub topic_database_bytes: u64,
+    pub browser_database_bytes: u64,
+    pub topic_count: i64,
+    pub observation_count: i64,
+    pub collection_run_count: i64,
+    pub browser_record_count: i64,
+    pub integrity_ok: bool,
+    pub latest_backup: Option<String>,
+}
+
+/// Result of an explicit native backup or restore operation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageOperationResult {
+    pub message: String,
+    pub backup_name: Option<String>,
+}
+
 /// One generated translation returned to the topic card.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

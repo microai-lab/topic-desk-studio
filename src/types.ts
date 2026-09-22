@@ -105,6 +105,25 @@ export interface SaveNetworkSettings {
   readonly proxyUrl: string
 }
 
+/** Aggregate native storage health; no persisted content or credential crosses this boundary. */
+export interface StorageStatus {
+  readonly dataDirectory: string
+  readonly topicDatabaseBytes: number
+  readonly browserDatabaseBytes: number
+  readonly topicCount: number
+  readonly observationCount: number
+  readonly collectionRunCount: number
+  readonly browserRecordCount: number
+  readonly integrityOk: boolean
+  readonly latestBackup: string | null
+}
+
+/** Result returned by a local backup, restore or maintenance command. */
+export interface StorageOperationResult {
+  readonly message: string
+  readonly backupName: string | null
+}
+
 /** One on-demand title translation. */
 export interface TranslationResult {
   readonly topicId: number

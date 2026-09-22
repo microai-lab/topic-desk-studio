@@ -3,14 +3,14 @@
 use std::fs;
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, MAIN_DB};
 use zeroize::Zeroizing;
 
 use crate::catalog::PLATFORM_CATALOG;
 use crate::credential_cipher::{CredentialCipher, EncryptedCredential, ALGORITHM, MASTER_KEY_FILE};
 use crate::error::{AppError, AppResult};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 
 /// Open the application database and migrate compatible older schemas transactionally.
@@ -21,9 +21,56 @@ pub fn open_database(path: &Path) -> AppResult<Connection> {
     let mut connection = Connection::open(path)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    if !integrity_ok(&connection)? {
+        return Err(AppError::Initialization("本地数据库完整性检查失败".into()));
+    }
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if (1..SCHEMA_VERSION).contains(&version) {
+        backup_before_migration(&connection, path, version)?;
+    }
     initialize(&mut connection, &path.with_file_name(MASTER_KEY_FILE))?;
     ensure_platforms(&connection)?;
     Ok(connection)
+}
+
+/// Open an independent query-only connection so page reads do not wait on the command writer lock.
+pub fn open_reader(path: &Path) -> AppResult<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
+    connection.pragma_update(None, "query_only", true)?;
+    Ok(connection)
+}
+
+/// Run SQLite's bounded startup integrity check without exposing database internals.
+pub fn integrity_ok(connection: &Connection) -> AppResult<bool> {
+    let result: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    Ok(result == "ok")
+}
+
+/// Preserve one online snapshot before a forward migration changes durable state.
+fn backup_before_migration(connection: &Connection, path: &Path, version: i64) -> AppResult<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| AppError::Initialization("数据库路径没有父目录".into()))?
+        .join("backups");
+    fs::create_dir_all(&directory)?;
+    connection.backup(
+        MAIN_DB,
+        directory.join(format!("topic-desk-pre-v{version}.sqlite")),
+        None,
+    )?;
+    let key = path.with_file_name(MASTER_KEY_FILE);
+    if key.is_file() {
+        fs::copy(
+            key,
+            directory.join(format!("model-credential-pre-v{version}.key")),
+        )?;
+    }
+    Ok(())
 }
 
 /// Seed catalog metadata without overwriting future user choices such as enabled state or feed URL.
@@ -70,15 +117,75 @@ fn initialize(connection: &mut Connection, master_key_path: &Path) -> AppResult<
                 }
             }
         }
-        1 => migrate_from_v1(connection),
-        2 => migrate_from_v2(connection),
-        3 => migrate_from_v3(connection),
-        4 => migrate_from_v4(connection, master_key_path),
-        5 => migrate_from_v5(connection),
+        1 => {
+            migrate_from_v1(connection)?;
+            migrate_from_v6(connection)
+        }
+        2 => {
+            migrate_from_v2(connection)?;
+            migrate_from_v6(connection)
+        }
+        3 => {
+            migrate_from_v3(connection)?;
+            migrate_from_v6(connection)
+        }
+        4 => {
+            migrate_from_v4(connection, master_key_path)?;
+            migrate_from_v6(connection)
+        }
+        5 => {
+            migrate_from_v5(connection)?;
+            migrate_from_v6(connection)
+        }
+        6 => migrate_from_v6(connection),
         unsupported => Err(AppError::Initialization(format!(
             "不支持的 Topic Desk 数据库版本：{unsupported}"
         ))),
     }
+}
+
+/// Version 7 adds bounded trend rollups and indexed title search without foreign keys.
+fn migrate_from_v6(connection: &mut Connection) -> AppResult<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE topic_observation_hourly (
+           topic_id INTEGER NOT NULL,
+           bucket TEXT NOT NULL,
+           rank INTEGER NOT NULL,
+           heat REAL,
+           sample_count INTEGER NOT NULL,
+           PRIMARY KEY (topic_id, bucket)
+         );
+         CREATE TABLE topic_observation_daily (
+           topic_id INTEGER NOT NULL,
+           bucket TEXT NOT NULL,
+           rank INTEGER NOT NULL,
+           heat REAL,
+           sample_count INTEGER NOT NULL,
+           PRIMARY KEY (topic_id, bucket)
+         );
+         CREATE VIRTUAL TABLE topic_fts USING fts5(
+           title, content = 'topic', content_rowid = 'id', tokenize = 'trigram'
+         );
+         INSERT INTO topic_fts(rowid, title) SELECT id, title FROM topic;
+         CREATE TRIGGER topic_fts_insert AFTER INSERT ON topic BEGIN
+           INSERT INTO topic_fts(rowid, title) VALUES (new.id, new.title);
+         END;
+         CREATE TRIGGER topic_fts_delete AFTER DELETE ON topic BEGIN
+           INSERT INTO topic_fts(topic_fts, rowid, title) VALUES ('delete', old.id, old.title);
+         END;
+         CREATE TRIGGER topic_fts_update AFTER UPDATE OF title ON topic BEGIN
+           INSERT INTO topic_fts(topic_fts, rowid, title) VALUES ('delete', old.id, old.title);
+           INSERT INTO topic_fts(rowid, title) VALUES (new.id, new.title);
+         END;
+         CREATE INDEX idx_observation_run_topic
+           ON topic_observation (collection_run_id, topic_id, deleted);
+         CREATE INDEX idx_collection_run_platform_status_end
+           ON collection_run (platform_id, status, end_time DESC, id DESC);
+         PRAGMA user_version = 7;
+         COMMIT;",
+    )?;
+    Ok(())
 }
 
 /// Version 1 lacked both the persistent creation queue and standalone model settings.
@@ -227,6 +334,29 @@ fn migrate_from_v5(connection: &mut Connection) -> AppResult<()> {
 mod tests {
     use super::*;
 
+    /// Older-version fixtures retain the domain tables that existed before credential migrations.
+    fn create_legacy_domain_tables(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE platform (
+                   id INTEGER PRIMARY KEY, code TEXT NOT NULL, display_name TEXT NOT NULL,
+                   home_url TEXT NOT NULL, feed_url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                   deleted INTEGER NOT NULL DEFAULT 0, create_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_success_run_id INTEGER
+                 );
+                 CREATE TABLE collection_run (
+                   id INTEGER PRIMARY KEY, platform_id INTEGER NOT NULL, status TEXT NOT NULL,
+                   end_time TEXT, deleted INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE topic (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+                 CREATE TABLE topic_observation (
+                   id INTEGER PRIMARY KEY, topic_id INTEGER NOT NULL,
+                   collection_run_id INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .expect("legacy domain tables should initialize");
+    }
+
     /// A new database must be initialized exactly to the supported schema version.
     #[test]
     fn initializes_memory_database() {
@@ -264,6 +394,7 @@ mod tests {
     #[test]
     fn migrates_version_three_database() {
         let mut connection = Connection::open_in_memory().expect("database should open");
+        create_legacy_domain_tables(&connection);
         connection
             .execute_batch(
                 "CREATE TABLE app_setting (
@@ -296,6 +427,7 @@ mod tests {
     #[test]
     fn migrates_empty_version_four_credential_table() {
         let mut connection = Connection::open_in_memory().expect("database should open");
+        create_legacy_domain_tables(&connection);
         connection
             .execute_batch(
                 "CREATE TABLE model_credential (
@@ -367,6 +499,7 @@ mod tests {
     #[test]
     fn removes_version_five_system_vault_payload() {
         let mut connection = Connection::open_in_memory().expect("database should open");
+        create_legacy_domain_tables(&connection);
         connection
             .execute_batch(
                 "CREATE TABLE model_credential (

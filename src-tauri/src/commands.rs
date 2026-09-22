@@ -7,13 +7,15 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use serde::Deserialize;
 use tauri::{Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::collector;
 use crate::credential_cipher::{CredentialCipher, MASTER_KEY_FILE};
 use crate::error::AppError;
 use crate::models::{
     ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings,
-    SaveUiPreferences, TopicPage, TopicQuery, TranslationResult, UiPreferences,
+    SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage, TopicQuery,
+    TranslationResult, UiPreferences,
 };
 use crate::repository::TopicRepository;
 use crate::translator;
@@ -49,7 +51,11 @@ fn with_repository<T>(
 /// Query one page of locally persisted topics.
 #[tauri::command]
 pub fn list_topics(state: State<'_, AppState>, query: TopicQuery) -> Result<TopicPage, String> {
-    with_repository(&state, |repository| repository.list(&query))
+    let connection =
+        crate::database::open_reader(&state.database_path).map_err(|error| error.to_string())?;
+    TopicRepository::new(&connection)
+        .list(&query)
+        .map_err(|error| error.to_string())
 }
 
 /// Persist one topic's creation-queue state idempotently.
@@ -116,6 +122,119 @@ pub fn save_network_settings(
         repository.network_settings()
     })
     .map_err(|error| error.to_string())
+}
+
+/// Return aggregate storage health without exposing topic, browser or credential contents.
+#[tauri::command]
+pub fn get_storage_status(
+    state: State<'_, AppState>,
+    browser: State<'_, crate::browser_profile::BrowserProfile>,
+) -> Result<StorageStatus, String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| AppError::PoisonedState.to_string())?;
+    let browser = browser.inner.lock().map_err(|error| error.to_string())?;
+    let data_directory = state.database_path.parent().ok_or("应用数据目录无效")?;
+    crate::storage::status(data_directory, &database, &browser.database)
+        .map_err(|error| error.to_string())
+}
+
+/// Create a consistent application-managed snapshot of both local databases.
+#[tauri::command]
+pub fn backup_storage(
+    state: State<'_, AppState>,
+    browser: State<'_, crate::browser_profile::BrowserProfile>,
+) -> Result<StorageOperationResult, String> {
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| AppError::PoisonedState.to_string())?;
+    let browser = browser.inner.lock().map_err(|error| error.to_string())?;
+    crate::storage::backup(
+        state.database_path.parent().ok_or("应用数据目录无效")?,
+        &database,
+        &browser.database,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Restore only application-created snapshots while collection is paused.
+#[tauri::command]
+pub fn restore_latest_backup(
+    state: State<'_, AppState>,
+    browser: State<'_, crate::browser_profile::BrowserProfile>,
+) -> Result<StorageOperationResult, String> {
+    if state
+        .refreshing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("采集进行中，暂时不能恢复备份".into());
+    }
+    let result = (|| {
+        let mut database = state
+            .database
+            .lock()
+            .map_err(|_| AppError::PoisonedState.to_string())?;
+        let mut browser = browser.inner.lock().map_err(|error| error.to_string())?;
+        let operation = crate::storage::restore_latest(
+            state.database_path.parent().ok_or("应用数据目录无效")?,
+            &mut database,
+            &mut browser.database,
+        )
+        .map_err(|error| error.to_string())?;
+        browser.settings = browser
+            .database
+            .query_row("SELECT json FROM preferences WHERE id=1", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default();
+        browser.tabs.clear();
+        browser.active_tab = None;
+        Ok(operation)
+    })();
+    state.refreshing.store(false, Ordering::Release);
+    result
+}
+
+/// Run retention, index optimization and passive WAL checkpoints on demand.
+#[tauri::command]
+pub fn optimize_storage(
+    state: State<'_, AppState>,
+    browser: State<'_, crate::browser_profile::BrowserProfile>,
+) -> Result<StorageOperationResult, String> {
+    with_repository(&state, |repository| repository.maintain_storage())?;
+    let browser = browser.inner.lock().map_err(|error| error.to_string())?;
+    crate::browser_profile::prune_records(&browser.database).map_err(|error| error.to_string())?;
+    browser
+        .database
+        .execute_batch("PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);")
+        .map_err(|error| error.to_string())?;
+    let database = state
+        .database
+        .lock()
+        .map_err(|_| AppError::PoisonedState.to_string())?;
+    database
+        .execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+        .map_err(|error| error.to_string())?;
+    Ok(StorageOperationResult {
+        message: "本地数据已整理".into(),
+        backup_name: None,
+    })
+}
+
+/// Reveal the private application data directory in the operating-system file manager.
+#[tauri::command]
+pub fn open_data_directory(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    app.opener()
+        .reveal_item_in_dir(&state.database_path)
+        .map_err(|error| error.to_string())
 }
 
 fn validate_proxy_url(input: &str) -> Result<Option<String>, String> {

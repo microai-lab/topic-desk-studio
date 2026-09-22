@@ -10,6 +10,9 @@ use std::{
 };
 use tauri::{Emitter, EventTarget, Manager};
 
+const BROWSER_SCHEMA_VERSION: i64 = 1;
+const RECORD_LIMIT: i64 = 2_000;
+
 /// Trusted browser chrome state; remote titles and URLs are displayed only as text.
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,7 +89,50 @@ pub struct BrowserTabSession {
 /// Use one browser database in the application data directory, never in the repository.
 pub fn open(path: PathBuf) -> Result<BrowserProfile, String> {
     let database = Connection::open(path).map_err(|e| e.to_string())?;
-    database.execute_batch("CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, time INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);").map_err(|e| e.to_string())?;
+    database
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| e.to_string())?;
+    database
+        .pragma_update(None, "busy_timeout", 5_000_i64)
+        .map_err(|e| e.to_string())?;
+    database
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| e.to_string())?;
+    let integrity: String = database
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if integrity != "ok" {
+        return Err("浏览器数据库完整性检查失败".into());
+    }
+    let version: i64 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    match version {
+        0 => database.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS records (
+               id INTEGER PRIMARY KEY,
+               kind TEXT NOT NULL CHECK(kind IN ('history', 'download')),
+               url TEXT NOT NULL,
+               title TEXT NOT NULL,
+               detail TEXT NOT NULL,
+               time INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS preferences (
+               id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_browser_records_kind_time
+               ON records(kind, time DESC, id DESC);
+             PRAGMA user_version = 1;
+             COMMIT;",
+        ),
+        BROWSER_SCHEMA_VERSION => Ok(()),
+        unsupported => Err(rusqlite::Error::InvalidParameterName(format!(
+            "不支持的浏览器数据库版本：{unsupported}"
+        ))),
+    }
+    .map_err(|e| e.to_string())?;
+    prune_records(&database).map_err(|e| e.to_string())?;
     let settings = database
         .query_row("SELECT json FROM preferences WHERE id=1", [], |r| {
             r.get::<_, String>(0)
@@ -102,6 +148,19 @@ pub fn open(path: PathBuf) -> Result<BrowserProfile, String> {
             active_tab: None,
         }),
     })
+}
+
+/// Keep both metadata collections bounded independently of their UI page size.
+pub(crate) fn prune_records(database: &Connection) -> rusqlite::Result<()> {
+    for kind in ["history", "download"] {
+        database.execute(
+            "DELETE FROM records WHERE kind = ?1 AND id NOT IN (
+               SELECT id FROM records WHERE kind = ?1 ORDER BY time DESC, id DESC LIMIT ?2
+             )",
+            params![kind, RECORD_LIMIT],
+        )?;
+    }
+    Ok(())
 }
 
 /// Milliseconds are used only for browser ordering and unique download names.
@@ -168,7 +227,7 @@ pub fn page_finished(app: &tauri::AppHandle, tab_id: &str, url: &str) {
         if let Ok(tx) = session.database.transaction() {
             let result = tx.execute("DELETE FROM records WHERE kind='history' AND url=?1", [url])
                 .and_then(|_| tx.execute("INSERT INTO records(kind,url,title,detail,time) VALUES('history',?1,?2,'',?3)", params![url, title, now()]))
-                .and_then(|_| tx.execute("DELETE FROM records WHERE kind='history' AND id NOT IN (SELECT id FROM records WHERE kind='history' ORDER BY time DESC LIMIT 2000)", []));
+                .and_then(|_| tx.execute("DELETE FROM records WHERE kind='history' AND id NOT IN (SELECT id FROM records WHERE kind='history' ORDER BY time DESC, id DESC LIMIT ?1)", [RECORD_LIMIT]));
             if result.is_ok() {
                 let _ = tx.commit();
             }
@@ -273,6 +332,7 @@ pub fn record_download(app: &tauri::AppHandle, url: &str, path: &std::path::Path
         "INSERT INTO records(kind,url,title,detail,time) VALUES('download',?1,?2,?3,?4)",
         params![url, title, format!("{detail}\n{}", path.display()), now()],
     );
+    let _ = prune_records(&session.database);
     let _ = app.emit_to(EventTarget::webview("main"), "browser-library-changed", ());
 }
 

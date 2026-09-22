@@ -1,5 +1,7 @@
 //! SQLite repository for topic pages, source health and persistent creation queue.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
 use crate::credential_cipher::{EncryptedCredential, ALGORITHM};
@@ -109,12 +111,17 @@ impl<'connection> TopicRepository<'connection> {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
         {
-            where_parts.push("t.title LIKE ? ESCAPE '\\'");
-            let escaped = search
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            owned_values.push(Box::new(format!("%{escaped}%")));
+            if search.chars().count() >= 3 {
+                where_parts.push("t.id IN (SELECT rowid FROM topic_fts WHERE topic_fts MATCH ?)");
+                owned_values.push(Box::new(format!("\"{}\"", search.replace('"', "\"\""))));
+            } else {
+                where_parts.push("t.title LIKE ? ESCAPE '\\'");
+                let escaped = search
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                owned_values.push(Box::new(format!("%{escaped}%")));
+            }
         }
         if let Some(topic_ids) = query.topic_ids.as_ref() {
             if topic_ids.len() > 5_000 || topic_ids.iter().any(|id| *id <= 0) {
@@ -182,15 +189,14 @@ impl<'connection> TopicRepository<'connection> {
         let mut topics = statement
             .query_map(page_values.as_slice(), |row| self.map_topic(row))?
             .collect::<Result<Vec<_>, _>>()?;
+        self.enrich_topics(&mut topics)?;
         for topic in &mut topics {
-            topic.trend = self.trend(topic.id)?;
             topic.rank_delta = topic
                 .trend
                 .iter()
                 .rev()
                 .nth(1)
                 .map(|previous| previous - topic.rank);
-            topic.consecutive_runs = self.consecutive_runs(topic.id, &topic.platform_code)?;
         }
 
         let queued_total: i64 = self.connection.query_row(
@@ -596,16 +602,64 @@ impl<'connection> TopicRepository<'connection> {
         Ok(stats)
     }
 
-    /// Bound ranking history so a long-running desktop install stays compact.
-    pub fn clean_observations(&self, retention_days: u32) -> AppResult<usize> {
-        if retention_days == 0 {
-            return Ok(0);
-        }
-        Ok(self.connection.execute(
-            "DELETE FROM topic_observation
-             WHERE create_time < datetime('now', '-' || ? || ' days')",
-            [retention_days],
-        )?)
+    /// Roll up trends and prune durable operational data with explicit retention windows.
+    pub fn maintain_storage(&self) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "INSERT INTO topic_observation_hourly(topic_id, bucket, rank, heat, sample_count)
+             SELECT topic_id, strftime('%Y-%m-%dT%H:00:00Z', create_time),
+                    CAST(ROUND(AVG(rank)) AS INTEGER), AVG(heat), COUNT(*)
+             FROM topic_observation
+             WHERE deleted = 0 AND create_time < datetime('now', '-1 day')
+             GROUP BY topic_id, strftime('%Y-%m-%dT%H:00:00Z', create_time)
+             ON CONFLICT(topic_id, bucket) DO UPDATE SET
+               rank = excluded.rank, heat = excluded.heat, sample_count = excluded.sample_count;
+
+             INSERT INTO topic_observation_daily(topic_id, bucket, rank, heat, sample_count)
+             SELECT topic_id, substr(bucket, 1, 10),
+                    CAST(ROUND(AVG(rank)) AS INTEGER), AVG(heat), SUM(sample_count)
+             FROM topic_observation_hourly
+             WHERE bucket < strftime('%Y-%m-%dT00:00:00Z', 'now', '-14 days')
+             GROUP BY topic_id, substr(bucket, 1, 10)
+             ON CONFLICT(topic_id, bucket) DO UPDATE SET
+               rank = excluded.rank, heat = excluded.heat, sample_count = excluded.sample_count;
+
+             DELETE FROM topic_observation WHERE create_time < datetime('now', '-14 days');
+             DELETE FROM topic_observation_hourly WHERE bucket < strftime('%Y-%m-%dT00:00:00Z', 'now', '-90 days');
+             DELETE FROM topic_observation_daily WHERE bucket < date('now', '-365 days');
+
+             DELETE FROM collection_run
+             WHERE id NOT IN (SELECT last_success_run_id FROM platform WHERE last_success_run_id IS NOT NULL)
+               AND ((status = 'succeeded' AND create_time < datetime('now', '-30 days'))
+                 OR (status <> 'succeeded' AND create_time < datetime('now', '-90 days')));
+
+             DELETE FROM creation_queue WHERE deleted <> 0 AND update_time < datetime('now', '-30 days');
+
+             DELETE FROM topic_observation_hourly WHERE topic_id IN (
+               SELECT t.id FROM topic t
+               LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
+               JOIN platform p ON p.id = t.platform_id
+               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+                 AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
+             );
+             DELETE FROM topic_observation_daily WHERE topic_id IN (
+               SELECT t.id FROM topic t
+               LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
+               JOIN platform p ON p.id = t.platform_id
+               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+                 AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
+             );
+             DELETE FROM topic WHERE id IN (
+               SELECT t.id FROM topic t
+               LEFT JOIN creation_queue q ON q.topic_id = t.id AND q.deleted = 0
+               JOIN platform p ON p.id = t.platform_id
+               WHERE q.id IS NULL AND t.update_time < datetime('now', '-180 days')
+                 AND t.last_collection_run_id <> COALESCE(p.last_success_run_id, -1)
+             );",
+        )?;
+        transaction.commit()?;
+        self.connection.execute_batch("PRAGMA optimize;")?;
+        Ok(())
     }
 
     /// Read all platform codes and apply in-memory catalog metadata filters.
@@ -651,34 +705,67 @@ impl<'connection> TopicRepository<'connection> {
         })
     }
 
-    /// Return up to twelve chronological rank observations for a sparkline.
-    fn trend(&self, topic_id: i64) -> AppResult<Vec<i64>> {
+    /// Batch rank history and streaks for one page, avoiding two queries per topic.
+    fn enrich_topics(&self, topics: &mut [TopicView]) -> AppResult<()> {
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::to_string(&topics.iter().map(|topic| topic.id).collect::<Vec<_>>())
+            .map_err(|error| {
+            AppError::Initialization(format!("话题批量查询序列化失败：{error}"))
+        })?;
+        let mut trends = HashMap::<i64, Vec<i64>>::new();
         let mut statement = self.connection.prepare(
-            "SELECT rank FROM topic_observation WHERE topic_id = ? AND deleted = 0
-             ORDER BY create_time DESC, id DESC LIMIT 12",
+            "SELECT topic_id, rank FROM (
+               SELECT topic_id, rank,
+                      ROW_NUMBER() OVER (PARTITION BY topic_id ORDER BY create_time DESC, id DESC) AS position
+               FROM topic_observation
+               WHERE deleted = 0 AND topic_id IN (SELECT value FROM json_each(?))
+             ) WHERE position <= 12 ORDER BY topic_id, position DESC",
         )?;
-        let mut values = statement
-            .query_map([topic_id], |row| row.get(0))?
-            .collect::<Result<Vec<i64>, _>>()?;
-        values.reverse();
-        Ok(values)
-    }
+        for row in statement.query_map([&ids], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (topic_id, rank) = row?;
+            trends.entry(topic_id).or_default().push(rank);
+        }
 
-    /// Count the uninterrupted suffix of successful runs containing this topic.
-    fn consecutive_runs(&self, topic_id: i64, platform_code: &str) -> AppResult<u32> {
+        let mut streaks = HashMap::<i64, (u32, bool)>::new();
         let mut statement = self.connection.prepare(
-            "SELECT EXISTS(
-               SELECT 1 FROM topic_observation o
-               WHERE o.collection_run_id = cr.id AND o.topic_id = ? AND o.deleted = 0
+            "WITH requested(topic_id) AS (SELECT value FROM json_each(?)),
+             recent_runs AS (
+               SELECT cr.id, cr.platform_id,
+                      ROW_NUMBER() OVER (PARTITION BY cr.platform_id ORDER BY cr.end_time DESC, cr.id DESC) AS position
+               FROM collection_run cr
+               WHERE cr.status = 'succeeded' AND cr.deleted = 0
              )
-             FROM collection_run cr JOIN platform p ON p.id = cr.platform_id
-             WHERE p.code = ? AND cr.status = 'succeeded' AND cr.deleted = 0
-             ORDER BY cr.end_time DESC, cr.id DESC LIMIT 100",
+             SELECT requested.topic_id, recent_runs.position,
+                    EXISTS(SELECT 1 FROM topic_observation observation
+                           WHERE observation.collection_run_id = recent_runs.id
+                             AND observation.topic_id = requested.topic_id
+                             AND observation.deleted = 0)
+             FROM requested
+             JOIN topic ON topic.id = requested.topic_id
+             JOIN recent_runs ON recent_runs.platform_id = topic.platform_id
+             WHERE recent_runs.position <= 100
+             ORDER BY requested.topic_id, recent_runs.position",
         )?;
-        let present = statement
-            .query_map(params![topic_id, platform_code], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(present.into_iter().take_while(|value| *value != 0).count() as u32)
+        for row in statement.query_map([&ids], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(2)? != 0))
+        })? {
+            let (topic_id, present) = row?;
+            let state = streaks.entry(topic_id).or_default();
+            if !state.1 && present {
+                state.0 += 1;
+            } else if !present {
+                state.1 = true;
+            }
+        }
+        for topic in topics {
+            topic.trend = trends.remove(&topic.id).unwrap_or_default();
+            topic.consecutive_runs = streaks.remove(&topic.id).map_or(0, |state| state.0);
+        }
+        Ok(())
     }
 
     /// Return the latest run status and current-topic count for every source.
@@ -845,6 +932,81 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.topics[0].consecutive_runs, 1);
         assert_eq!(page.topics[0].trend, vec![1]);
+        let searched = repository
+            .list(&TopicQuery {
+                search: Some("可测试".into()),
+                ..TopicQuery::default()
+            })
+            .expect("trigram title search should load");
+        assert_eq!(searched.total, 1);
+    }
+
+    /// Maintenance rolls old raw observations up before applying retention windows.
+    #[test]
+    fn rolls_up_and_prunes_operational_history() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let run_id = repository.create_run(platform.id, "manual").unwrap();
+        repository
+            .commit_feed(
+                &platform,
+                run_id,
+                &ParsedFeed {
+                    topics: vec![CollectedTopic {
+                        platform_code: "qbitai".into(),
+                        stable_id: Some("old-story".into()),
+                        title: "历史趋势样本".into(),
+                        url: "https://www.qbitai.com/old-story".into(),
+                        published_time: None,
+                        rank: 3,
+                        heat: Some(10.0),
+                    }],
+                    fetched_count: 1,
+                    invalid_count: 0,
+                },
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE topic_observation SET create_time = datetime('now', '-20 days')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_run(platform_id, status, trigger_kind, scheduled_time,
+                   start_time, end_time, create_time, update_time)
+                 VALUES(?1, 'succeeded', 'test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                   CURRENT_TIMESTAMP, datetime('now', '-40 days'), datetime('now', '-40 days'))",
+                [platform.id],
+            )
+            .unwrap();
+
+        repository
+            .maintain_storage()
+            .expect("maintenance should succeed");
+
+        let raw: i64 = connection
+            .query_row("SELECT COUNT(*) FROM topic_observation", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let daily: i64 = connection
+            .query_row("SELECT COUNT(*) FROM topic_observation_daily", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let old_runs: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM collection_run WHERE trigger_kind = 'test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, 0);
+        assert_eq!(daily, 1);
+        assert_eq!(old_runs, 0);
     }
 
     /// An explicit empty ID selection represents an empty new-topic result, never all topics.

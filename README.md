@@ -30,6 +30,7 @@ Topic Desk Studio is a standalone desktop edition of [`dsh-topic-desk`](https://
 - **Source controls and health** with individual enable/disable switches and recent error details.
 - **Optional title translation** through any OpenAI-compatible chat-completions endpoint.
 - **Private by design:** topics, queues, and model settings stay in the local application database.
+- **Local data controls:** inspect storage health, compact expired history, create local backups, and restore the latest snapshot.
 - **Safe link handling:** original articles open as tabs in an isolated reading panel that accepts only web links.
 
 ## Screens and workflows
@@ -64,6 +65,7 @@ The default compatible endpoint is `https://api.deepseek.com` with model `deepse
 ## Data and privacy
 
 - Topic history, source health, model settings, and the creation queue stay on the device.
+- The app keeps high-frequency trend history bounded and retains up to three user-created local backups.
 - Topic Desk Studio does not require an account and does not upload the creation queue.
 - Only a title explicitly selected for translation is sent to the configured model endpoint.
 - Availability of public sources may change as websites update their feeds, markup, or access policies.

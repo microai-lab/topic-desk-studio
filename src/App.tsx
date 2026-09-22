@@ -1,11 +1,12 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Network, PanelRight, Radar, RefreshCw, Search, Settings, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, FolderOpen, HardDrive, Network, PanelRight, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Wrench } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  browserRequest, collectXiaohongshuSession, getModelSettings, getNetworkSettings, getUiPreferences,
-  listTopics, refreshTopics, saveModelSettings, saveNetworkSettings, saveUiPreferences,
-  setPlatformEnabled, setTopicQueued, translateTopic,
+  backupStorage, browserRequest, collectXiaohongshuSession, getModelSettings, getNetworkSettings,
+  getStorageStatus, getUiPreferences, listTopics, openDataDirectory, optimizeStorage, refreshTopics,
+  restoreLatestBackup, saveModelSettings, saveNetworkSettings, saveUiPreferences, setPlatformEnabled,
+  setTopicQueued, translateTopic,
 } from './api'
 import { BrowserPane } from './BrowserPane'
 import type { BrowserTab } from './BrowserPane'
@@ -14,11 +15,11 @@ import {
   Locale, Theme, Messages, messages,
   detectLocale, detectTheme, applyTheme,
 } from './i18n'
-import type { ModelSettings, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
+import type { ModelSettings, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
 
 const PAGE_SIZE = 20
 type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
-type SettingsTab = 'general' | 'network' | 'sources' | 'model'
+type SettingsTab = 'general' | 'network' | 'sources' | 'model' | 'storage'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
 
 function formatTime(value: string): string {
@@ -26,6 +27,18 @@ function formatTime(value: string): string {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   }).format(new Date(value))
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatBackupName(value: string | null, fallback: string): string {
+  if (value === null) return fallback
+  const seconds = Number(value.replace(/^backup-/, ''))
+  return Number.isFinite(seconds) ? new Date(seconds * 1000).toLocaleString() : value
 }
 
 /** Compare article URLs without cosmetic host, fragment, or trailing-slash differences. */
@@ -194,6 +207,8 @@ export function App() {
   const [savingSettings,  setSavingSettings]     = useState(false)
   const [proxyUrl,        setProxyUrl]           = useState('')
   const [savingNetwork,   setSavingNetwork]      = useState(false)
+  const [storageStatus,   setStorageStatus]      = useState<StorageStatus>()
+  const [storageAction,   setStorageAction]      = useState<'backup' | 'restore' | 'optimize' | null>(null)
 
   browserTabsRef.current = browserTabs
   activeBrowserTabIdRef.current = activeBrowserTabId
@@ -399,6 +414,8 @@ export function App() {
     }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getNetworkSettings().then((s) => setProxyUrl(s.proxyUrl ?? ''))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+    void getStorageStatus().then(setStorageStatus)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [view])
 
   // ── Actions ──────────────────────────────────────────────────────
@@ -461,6 +478,23 @@ export function App() {
     } finally { setSavingNetwork(false) }
   }
 
+  const runStorageAction = async (action: 'backup' | 'restore' | 'optimize'): Promise<void> => {
+    if (action === 'restore' && !window.confirm(m.storageRestoreConfirm)) return
+    setStorageAction(action); setError(undefined); setNotice(undefined)
+    try {
+      const result = action === 'backup'
+        ? await backupStorage()
+        : action === 'restore'
+          ? await restoreLatestBackup()
+          : await optimizeStorage()
+      setNotice(result.message)
+      setStorageStatus(await getStorageStatus())
+      if (action === 'restore') await load(true)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally { setStorageAction(null) }
+  }
+
   const switchView = (next: ViewMode): void => {
     if (next === 'settings' && view !== 'settings') {
       setPrevView(view as Exclude<ViewMode, 'settings'>)
@@ -477,12 +511,14 @@ export function App() {
       network: Network,
       sources: Database,
       model: Bot,
+      storage: HardDrive,
     }
     const tabLabels: Record<SettingsTab, string> = {
       general: m.tabGeneral,
       network: m.sectionNetwork,
       sources: m.tabSources,
       model: m.tabModel,
+      storage: m.tabStorage,
     }
     return (
       <div className="settings-fullscreen">
@@ -496,7 +532,7 @@ export function App() {
         <div className="settings-layout">
           {/* Left tab nav */}
           <nav className="settings-tabs" aria-label={m.settingsTitle}>
-            {(['general', 'sources', 'model', 'network'] as SettingsTab[]).map((tab) => {
+            {(['general', 'sources', 'model', 'storage', 'network'] as SettingsTab[]).map((tab) => {
               const TabIcon = tabIcons[tab]
               return (
                 <button
@@ -598,6 +634,43 @@ export function App() {
                     </label>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {settingsTab === 'storage' && (
+              <div className="storage-card">
+                <div>
+                  <p className="eyebrow">LOCAL-FIRST</p>
+                  <h2>{m.storageHeading}</h2>
+                  <p>{m.storageDesc}</p>
+                </div>
+                {storageStatus !== undefined ? (
+                  <>
+                    <div className={`storage-health ${storageStatus.integrityOk ? 'healthy' : 'failed'}`}>
+                      <span />{storageStatus.integrityOk ? m.storageHealthy : m.storageDamaged}
+                    </div>
+                    <div className="storage-metrics">
+                      <div><strong>{storageStatus.topicCount.toLocaleString()}</strong><span>{m.storageTopics}</span></div>
+                      <div><strong>{storageStatus.observationCount.toLocaleString()}</strong><span>{m.storageTrends}</span></div>
+                      <div><strong>{storageStatus.collectionRunCount.toLocaleString()}</strong><span>{m.storageRuns}</span></div>
+                      <div><strong>{storageStatus.browserRecordCount.toLocaleString()}</strong><span>{m.storageBrowser}</span></div>
+                    </div>
+                    <dl className="storage-details">
+                      <div><dt>{m.storageTopicDb}</dt><dd>{formatBytes(storageStatus.topicDatabaseBytes)}</dd></div>
+                      <div><dt>{m.storageBrowserDb}</dt><dd>{formatBytes(storageStatus.browserDatabaseBytes)}</dd></div>
+                      <div><dt>{m.storageLatestBackup}</dt><dd>{formatBackupName(storageStatus.latestBackup, m.storageNoBackup)}</dd></div>
+                    </dl>
+                  </>
+                ) : null}
+                {notice !== undefined ? <div className="notice">{notice}</div> : null}
+                {error !== undefined ? <div className="error-banner">{error}</div> : null}
+                <div className="storage-actions">
+                  <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
+                  <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
+                  <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
+                  <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => void runStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
+                </div>
+                {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}
               </div>
             )}
 

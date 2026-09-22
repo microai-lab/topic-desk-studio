@@ -60,6 +60,7 @@ export interface Messages {
   tabGeneral: string
   tabSources: string
   tabModel: string
+  tabStorage: string
   // General tab — appearance
   sectionAppearance: string
   labelTheme: string
@@ -75,6 +76,24 @@ export interface Messages {
   proxyPlaceholder: string
   proxyHelp: string
   networkSaveNotice: string
+  storageHeading: string
+  storageDesc: string
+  storageHealthy: string
+  storageDamaged: string
+  storageTopics: string
+  storageTrends: string
+  storageRuns: string
+  storageBrowser: string
+  storageTopicDb: string
+  storageBrowserDb: string
+  storageLatestBackup: string
+  storageNoBackup: string
+  storageOpenFolder: string
+  storageOptimize: string
+  storageBackup: string
+  storageRestore: string
+  storageWorking: string
+  storageRestoreConfirm: string
   // Sources tab
   regionDomestic: string
   regionIntl: string
@@ -144,6 +163,7 @@ const zh: Messages = {
   tabGeneral: '通用',
   tabSources: '数据来源',
   tabModel: '翻译模型',
+  tabStorage: '本地数据',
   sectionAppearance: '外观',
   labelTheme: '主题',
   themeLight: '浅色',
@@ -157,6 +177,24 @@ const zh: Messages = {
   proxyPlaceholder: '例如 http://127.0.0.1:7897',
   proxyHelp: '仅直连受限的境外来源使用该代理；国内及可直连来源保持直连。留空表示全部直连。',
   networkSaveNotice: '采集代理设置已保存。',
+  storageHeading: '本地数据管理',
+  storageDesc: '话题、采集历史和浏览记录均保存在本机。系统会自动汇总趋势并清理过期运行记录。',
+  storageHealthy: '数据库状态正常',
+  storageDamaged: '数据库完整性异常',
+  storageTopics: '话题',
+  storageTrends: '趋势记录',
+  storageRuns: '采集运行',
+  storageBrowser: '浏览记录',
+  storageTopicDb: '选题数据库',
+  storageBrowserDb: '浏览数据库',
+  storageLatestBackup: '最近备份',
+  storageNoBackup: '尚未创建',
+  storageOpenFolder: '打开数据目录',
+  storageOptimize: '立即整理',
+  storageBackup: '创建备份',
+  storageRestore: '恢复最近备份',
+  storageWorking: '处理中…',
+  storageRestoreConfirm: '恢复将覆盖当前本地数据，并保留下载文件。确定继续吗？',
   regionDomestic: '国内',
   regionIntl: '国际',
   notCollected: '尚未采集',
@@ -224,6 +262,7 @@ const en: Messages = {
   tabGeneral: 'General',
   tabSources: 'Sources',
   tabModel: 'Translation',
+  tabStorage: 'Local data',
   sectionAppearance: 'Appearance',
   labelTheme: 'Theme',
   themeLight: 'Light',
@@ -237,6 +276,24 @@ const en: Messages = {
   proxyPlaceholder: 'For example http://127.0.0.1:7897',
   proxyHelp: 'Only restricted international sources use this proxy. Domestic and directly reachable sources remain direct. Leave blank to make every source direct.',
   networkSaveNotice: 'Collection proxy saved.',
+  storageHeading: 'Local Data',
+  storageDesc: 'Topics, collection history, and browser records stay on this device. Trends are rolled up and expired run data is pruned automatically.',
+  storageHealthy: 'Databases healthy',
+  storageDamaged: 'Database integrity issue',
+  storageTopics: 'Topics',
+  storageTrends: 'Trend records',
+  storageRuns: 'Collection runs',
+  storageBrowser: 'Browser records',
+  storageTopicDb: 'Topic database',
+  storageBrowserDb: 'Browser database',
+  storageLatestBackup: 'Latest backup',
+  storageNoBackup: 'Not created yet',
+  storageOpenFolder: 'Open data folder',
+  storageOptimize: 'Optimize now',
+  storageBackup: 'Create backup',
+  storageRestore: 'Restore latest',
+  storageWorking: 'Working…',
+  storageRestoreConfirm: 'Restoring replaces current local data but keeps downloaded files. Continue?',
   regionDomestic: 'China',
   regionIntl: 'Intl',
   notCollected: 'Not yet collected',

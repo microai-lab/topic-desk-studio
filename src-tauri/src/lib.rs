@@ -12,12 +12,15 @@ mod error;
 mod identity;
 mod models;
 mod repository;
+mod storage;
 mod translator;
 
 use commands::{
-    browser_request, collect_xiaohongshu_session, get_model_settings, get_network_settings,
-    get_ui_preferences, list_topics, refresh_topics, save_model_settings, save_network_settings,
-    save_ui_preferences, set_platform_enabled, set_topic_queued, translate_topic, AppState,
+    backup_storage, browser_request, collect_xiaohongshu_session, get_model_settings,
+    get_network_settings, get_storage_status, get_ui_preferences, list_topics, open_data_directory,
+    optimize_storage, refresh_topics, restore_latest_backup, save_model_settings,
+    save_network_settings, save_ui_preferences, set_platform_enabled, set_topic_queued,
+    translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,6 +39,12 @@ pub fn run() {
                 .map_err(|error| format!("无法解析应用数据目录：{error}"))?;
             std::fs::create_dir_all(&data_dir)
                 .map_err(|error| format!("无法创建应用数据目录：{error}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("无法限制应用数据目录权限：{error}"))?;
+            }
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
@@ -75,6 +84,11 @@ pub fn run() {
             save_ui_preferences,
             get_network_settings,
             save_network_settings,
+            get_storage_status,
+            backup_storage,
+            restore_latest_backup,
+            optimize_storage,
+            open_data_directory,
             set_platform_enabled,
             set_topic_queued,
             translate_topic,
