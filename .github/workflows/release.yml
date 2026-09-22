@@ -66,6 +66,9 @@ jobs:
 
       - name: Build native installers
         run: pnpm tauri build ${{ matrix.args }}
+        # Tauri otherwise skips the Finder background and icon layout on CI.
+        env:
+          TAURI_BUNDLER_DMG_IGNORE_CI: ${{ startsWith(matrix.platform, 'macos-') && 'true' || 'false' }}
 
       # Upload every native bundle without assuming code-signing or release credentials exist.
       - name: Upload installers

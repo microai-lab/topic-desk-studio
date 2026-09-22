@@ -38,6 +38,23 @@
     ],
     "category": "Productivity",
     "shortDescription": "Local-first trend curation workspace",
-    "longDescription": "Collect, search, track and curate trending topics in a private local database."
+    "longDescription": "Collect, search, track and curate trending topics in a private local database.",
+    "macOS": {
+      "dmg": {
+        "background": "dmg/background.png",
+        "windowSize": {
+          "width": 720,
+          "height": 440
+        },
+        "appPosition": {
+          "x": 190,
+          "y": 244
+        },
+        "applicationFolderPosition": {
+          "x": 530,
+          "y": 244
+        }
+      }
+    }
   }
 }
