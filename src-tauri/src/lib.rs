@@ -6,6 +6,7 @@ mod catalog;
 mod collector;
 mod commands;
 mod credential_cipher;
+mod data_directory;
 mod database;
 mod desktop;
 mod error;
@@ -18,10 +19,11 @@ mod translator;
 use commands::{
     backup_storage, browser_request, collect_xiaohongshu_session, delete_source,
     export_source_configurations, get_model_settings, get_network_settings, get_storage_status,
-    get_ui_preferences, import_source_configurations, list_source_configurations, list_topics,
-    open_data_directory, optimize_storage, refresh_topics, restore_default_sources,
-    restore_latest_backup, save_model_settings, save_network_settings, save_source_configuration,
-    save_ui_preferences, set_platform_enabled, set_topic_queued, translate_topic, AppState,
+    get_ui_preferences, hide_topic, import_source_configurations, list_source_configurations,
+    list_topics, open_data_directory, optimize_storage, refresh_topics,
+    reorder_source_configurations, restore_default_sources, restore_latest_backup,
+    save_model_settings, save_network_settings, save_source_configuration, save_ui_preferences,
+    set_platform_enabled, set_topic_queued, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,18 +37,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|error| format!("无法解析应用数据目录：{error}"))?;
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|error| format!("无法创建应用数据目录：{error}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| format!("无法限制应用数据目录权限：{error}"))?;
-            }
+            let data_dir = data_directory::prepare(app.handle())?;
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
@@ -123,12 +114,14 @@ pub fn run() {
             open_data_directory,
             set_platform_enabled,
             list_source_configurations,
+            reorder_source_configurations,
             save_source_configuration,
             delete_source,
             export_source_configurations,
             import_source_configurations,
             restore_default_sources,
             set_topic_queued,
+            hide_topic,
             translate_topic,
             browser_request,
             browser_control::browser_control

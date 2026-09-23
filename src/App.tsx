@@ -1,14 +1,14 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Download, FolderOpen, HardDrive, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Download, EyeOff, FolderOpen, GripVertical, HardDrive, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  backupStorage, browserRequest, collectXiaohongshuSession, deleteSource, exportSourceConfigurations,
+  backupStorage, browserRequest, collectXiaohongshuSession, deleteSource, exportSourceConfigurations, hideTopic,
   getModelSettings, getNetworkSettings, getStorageStatus, getUiPreferences, importSourceConfigurations, listSourceConfigurations, listTopics,
   openDataDirectory, optimizeStorage, refreshTopics, restoreLatestBackup, saveModelSettings,
-  restoreDefaultSources, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
+  reorderSourceConfigurations, restoreDefaultSources, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
   setTopicQueued, translateTopic,
 } from './api'
 import { BrowserPane } from './BrowserPane'
@@ -25,6 +25,30 @@ type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
 type SettingsTab = 'general' | 'network' | 'sources' | 'model' | 'storage'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
 interface NoticeState { readonly scope: 'workspace' | 'network' | 'sources' | 'model' | 'storage'; readonly text: string }
+interface SourceDropTarget { readonly code: string; readonly after: boolean }
+interface SourcePointerDrag { readonly code: string; readonly pointerId: number; readonly startY: number; readonly currentY: number; readonly active: boolean }
+interface FilterOption { readonly value: string; readonly label: string; readonly removable?: boolean }
+type ModelProviderId = 'deepseek' | 'openai' | 'dashscope' | 'siliconflow' | 'volcengine' | 'ollama' | 'custom'
+interface ModelProviderPreset { readonly id: Exclude<ModelProviderId, 'custom'>; readonly label: string; readonly endpoint: string; readonly models: readonly string[] }
+
+/** OpenAI-compatible providers that can use the native translation client unchanged. */
+const MODEL_PROVIDER_PRESETS: readonly ModelProviderPreset[] = [
+  { id: 'deepseek', label: 'DeepSeek', endpoint: 'https://api.deepseek.com', models: ['deepseek-flash', 'deepseek-v4-pro'] },
+  { id: 'openai', label: 'OpenAI', endpoint: 'https://api.openai.com/v1', models: ['gpt-5-mini', 'gpt-4.1-mini', 'gpt-4.1-nano'] },
+  { id: 'dashscope', label: '阿里云百炼', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-flash', 'qwen-plus', 'qwen-turbo', 'qwen3-max'] },
+  { id: 'siliconflow', label: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1', models: ['Pro/deepseek-ai/DeepSeek-V3.2', 'Pro/zai-org/GLM-5.1', 'Qwen/Qwen3-8B'] },
+  { id: 'volcengine', label: '火山方舟', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-1-pro-260628', 'doubao-seed-evolving'] },
+  { id: 'ollama', label: 'Ollama（本地）', endpoint: 'http://localhost:11434/v1', models: ['qwen3:8b', 'qwen3:4b', 'llama3.2'] },
+]
+
+function normalizeEndpoint(value: string): string {
+  return value.trim().replace(/\/+$/, '')
+}
+
+/** Infer a visual provider selection from the persisted endpoint without changing storage. */
+function detectModelProvider(endpoint: string): ModelProviderId {
+  return MODEL_PROVIDER_PRESETS.find((provider) => normalizeEndpoint(provider.endpoint) === normalizeEndpoint(endpoint))?.id ?? 'custom'
+}
 
 const EMPTY_SOURCE: SaveSourceConfiguration = {
   code: '', displayName: '', homeUrl: '', endpointUrl: '',
@@ -73,7 +97,53 @@ function RankTrend({ values, label }: { readonly values: number[]; readonly labe
   )
 }
 
-function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTranslate, onOpen, selected }: {
+/** Shared filter dropdown; source options may additionally expose a disable action. */
+function FilterDropdown({ label, options, value, onChange, onRemove, removeLabel }: {
+  readonly label: string
+  readonly options: FilterOption[]
+  readonly value: string
+  readonly onChange: (value: string) => void
+  readonly onRemove?: (value: string) => Promise<void>
+  readonly removeLabel?: (option: FilterOption) => string
+}) {
+  const [open, setOpen] = useState(false)
+  const [disabling, setDisabling] = useState<string>()
+  const root = useRef<HTMLDivElement>(null)
+  const selected = options.find((option) => option.value === value) ?? options[0]
+
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [open])
+
+  const remove = async (optionValue: string): Promise<void> => {
+    if (onRemove === undefined) return
+    setDisabling(optionValue)
+    try { await onRemove(optionValue) }
+    finally { setDisabling(undefined) }
+  }
+
+  return <div className="source-filter-field" ref={root} onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+    <span>{label}</span>
+    <div className="source-filter-control">
+      <button className="source-filter-trigger" type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <span>{selected?.label ?? ''}</span><ChevronDown aria-hidden="true" />
+      </button>
+      {open ? <div className="source-filter-menu" role="listbox" aria-label={label}>
+        {options.map((option) => <div className={`source-filter-option-row${value === option.value ? ' selected' : ''}`} role="option" aria-selected={value === option.value} key={option.value}>
+          <button className="source-filter-option" type="button" onClick={() => { onChange(option.value); setOpen(false) }}>{option.label}</button>
+          {option.removable === true && onRemove !== undefined ? <button className="source-filter-disable" type="button" disabled={disabling === option.value} aria-label={removeLabel?.(option) ?? option.label} title={removeLabel?.(option) ?? option.label} onClick={() => void remove(option.value)}><X aria-hidden="true" /></button> : null}
+        </div>)}
+      </div> : null}
+    </div>
+  </div>
+}
+
+function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTranslate, onHide, onOpen, selected }: {
   readonly topic: TopicView
   /** Mixed-source pages use the query-wide rank; one source keeps its native rank. */
   readonly displayRank: number
@@ -83,12 +153,20 @@ function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTransl
   readonly m: Messages
   readonly onQueueChange: (topic: TopicView, queued: boolean) => Promise<void>
   readonly onTranslate: (topic: TopicView) => Promise<void>
+  readonly onHide?: (topic: TopicView) => Promise<void>
 }) {
   const [saving, setSaving] = useState(false)
+  const [hiding, setHiding] = useState(false)
   const toggleQueue = async (): Promise<void> => {
     setSaving(true)
     try { await onQueueChange(topic, !topic.queued) }
     finally { setSaving(false) }
+  }
+  const hide = async (): Promise<void> => {
+    if (onHide === undefined) return
+    setHiding(true)
+    try { await onHide(topic) }
+    finally { setHiding(false) }
   }
 
   return (
@@ -130,6 +208,7 @@ function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTransl
           <button className="text-button" type="button" disabled={saving} onClick={() => void toggleQueue()}>
             {saving ? m.saving : topic.queued ? m.queueRemove : m.queueAdd}
           </button>
+          {onHide !== undefined ? <button className="text-button topic-hide-button" type="button" disabled={hiding} title={m.topicHide} onClick={() => void hide()}><EyeOff aria-hidden="true" />{hiding ? m.saving : m.topicHide}</button> : null}
         </div>
       </div>
     </article>
@@ -198,6 +277,8 @@ export function App() {
   const [source,   setSource]   = useState('all')
   const [sort,     setSort]     = useState<'rank' | 'updated'>('rank')
   const [search,   setSearch]   = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const [pageIndex, setPageIndex] = useState(0)
 
   // ── Data state ──────────────────────────────────────────────────
@@ -211,7 +292,8 @@ export function App() {
   // ── Settings state ──────────────────────────────────────────────
   const [modelSettings,   setModelSettingsState] = useState<ModelSettings>()
   const [modelEndpoint,   setModelEndpoint]      = useState('https://api.deepseek.com')
-  const [modelName,       setModelName]          = useState('deepseek-chat')
+  const [modelName,       setModelName]          = useState('deepseek-flash')
+  const [modelProvider,   setModelProvider]      = useState<ModelProviderId>('deepseek')
   const [apiKey,          setApiKey]             = useState('')
   const [savingSettings,  setSavingSettings]     = useState(false)
   const [proxyUrl,        setProxyUrl]           = useState('')
@@ -222,7 +304,27 @@ export function App() {
   const [sourceDraft,     setSourceDraft]        = useState<SaveSourceConfiguration>()
   const [editingSourceCode, setEditingSourceCode] = useState<string>()
   const [sourceBuiltIn,   setSourceBuiltIn]      = useState(false)
+  const [draggingSourceCode, setDraggingSourceCode] = useState<string>()
+  const [sourceDropTarget, setSourceDropTarget] = useState<SourceDropTarget>()
+  const [sourcePointerDrag, setSourcePointerDrag] = useState<SourcePointerDrag>()
+  const sourcePointerDragRef = useRef<SourcePointerDrag | undefined>(undefined)
+  const [reorderingSources, setReorderingSources] = useState(false)
   const [savingSource,    setSavingSource]       = useState(false)
+  const selectedModelProvider = MODEL_PROVIDER_PRESETS.find((provider) => provider.id === modelProvider)
+  const modelUsesPreset = selectedModelProvider?.models.includes(modelName) === true
+  const enabledSourceConfigs = useMemo(
+    () => sourceConfigs.filter((sourceConfig) => sourceConfig.enabled),
+    [sourceConfigs],
+  )
+  /** Cascading filters expose only combinations backed by an enabled source. */
+  const regionSourceConfigs = useMemo(
+    () => enabledSourceConfigs.filter((sourceConfig) => region === 'all' || sourceConfig.region === region),
+    [enabledSourceConfigs, region],
+  )
+  const linkedSourceConfigs = useMemo(
+    () => regionSourceConfigs.filter((sourceConfig) => category === 'all' || sourceConfig.category === category),
+    [category, regionSourceConfigs],
+  )
 
   browserTabsRef.current = browserTabs
   activeBrowserTabIdRef.current = activeBrowserTabId
@@ -456,17 +558,42 @@ export function App() {
   }, [load])
 
   useEffect(() => {
+    void listSourceConfigurations().then(setSourceConfigs)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+  }, [])
+
+  useEffect(() => {
+    if (region === 'all' || enabledSourceConfigs.some((sourceConfig) => sourceConfig.region === region)) return
+    setRegion('all')
+    setCategory('all')
+    setSource('all')
+    setPageIndex(0)
+  }, [enabledSourceConfigs, region])
+
+  useEffect(() => {
+    if (category === 'all' || regionSourceConfigs.some((sourceConfig) => sourceConfig.category === category)) return
+    setCategory('all')
+    setSource('all')
+    setPageIndex(0)
+  }, [category, regionSourceConfigs])
+
+  useEffect(() => {
+    if (source === 'all' || linkedSourceConfigs.some((sourceConfig) => sourceConfig.code === source)) return
+    setSource('all')
+    setPageIndex(0)
+  }, [linkedSourceConfigs, source])
+
+  useEffect(() => {
     if (view !== 'settings') return
     void getModelSettings().then((s) => {
       setModelSettingsState(s)
       setModelEndpoint(s.endpoint)
       setModelName(s.model)
+      setModelProvider(detectModelProvider(s.endpoint))
     }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getNetworkSettings().then((s) => setProxyUrl(s.proxyUrl ?? ''))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getStorageStatus().then(setStorageStatus)
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-    void listSourceConfigurations().then(setSourceConfigs)
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [view])
 
@@ -501,6 +628,18 @@ export function App() {
     await load()
   }
 
+  const hideDislikedTopic = async (topic: TopicView): Promise<void> => {
+    if (!window.confirm(m.topicHideConfirm(topic.title))) return
+    setError(undefined)
+    try {
+      await hideTopic(topic.id)
+      setNotice({ scope: 'workspace', text: m.topicHidden })
+      await load(true)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
   const changePlatform = async (code: string, enabled: boolean): Promise<void> => {
     setError(undefined)
     try {
@@ -513,6 +652,12 @@ export function App() {
 
   const editSource = (source?: SourceConfiguration): void => {
     setError(undefined); setNotice(undefined)
+    if (source !== undefined && editingSourceCode === source.code && sourceDraft !== undefined) {
+      setEditingSourceCode(undefined)
+      setSourceDraft(undefined)
+      setSourceBuiltIn(false)
+      return
+    }
     setEditingSourceCode(source?.code)
     setSourceBuiltIn(source?.builtIn === true)
     setSourceDraft(source === undefined ? { ...EMPTY_SOURCE, parserConfig: {} } : {
@@ -593,6 +738,91 @@ export function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
+  const persistSourceOrder = async (next: SourceConfiguration[]): Promise<void> => {
+    if (reorderingSources || next.map((item) => item.code).join('\0') === sourceConfigs.map((item) => item.code).join('\0')) return
+    const previous = sourceConfigs
+    setSourceConfigs(next)
+    setReorderingSources(true)
+    setError(undefined)
+    try {
+      setSourceConfigs(await reorderSourceConfigurations(next.map((item) => item.code)))
+    } catch (reason) {
+      setSourceConfigs(previous)
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setReorderingSources(false)
+    }
+  }
+
+  const dropSource = (targetCode: string, after: boolean, draggedCode: string): void => {
+    setDraggingSourceCode(undefined)
+    setSourceDropTarget(undefined)
+    if (draggedCode === targetCode) return
+    const dragged = sourceConfigs.find((item) => item.code === draggedCode)
+    if (dragged === undefined) return
+    const next = sourceConfigs.filter((item) => item.code !== draggedCode)
+    const targetIndex = next.findIndex((item) => item.code === targetCode)
+    if (targetIndex < 0) return
+    next.splice(targetIndex + (after ? 1 : 0), 0, dragged)
+    void persistSourceOrder(next)
+  }
+
+  const sourceTargetAt = (clientX: number, clientY: number, draggedCode: string): SourceDropTarget | undefined => {
+    for (const element of document.elementsFromPoint(clientX, clientY)) {
+      const item = element.closest<HTMLElement>('[data-source-code]')
+      const code = item?.dataset.sourceCode
+      if (item === null || code === undefined || code === draggedCode) continue
+      const bounds = (item.querySelector<HTMLElement>(':scope > .source-row') ?? item).getBoundingClientRect()
+      return { code, after: clientY >= bounds.top + bounds.height / 2 }
+    }
+    return undefined
+  }
+
+  const beginSourcePointerDrag = (event: ReactPointerEvent<HTMLDivElement>, code: string): void => {
+    if (reorderingSources || event.button !== 0) return
+    const origin = event.target
+    if (origin instanceof Element && origin.closest('button, input, label, select, textarea, a')) return
+    if (event.pointerType !== 'mouse' && origin instanceof Element && !origin.closest('.source-drag-handle')) return
+    event.preventDefault()
+    window.getSelection()?.removeAllRanges()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const drag = { code, pointerId: event.pointerId, startY: event.clientY, currentY: event.clientY, active: false }
+    sourcePointerDragRef.current = drag
+    setSourcePointerDrag(drag)
+  }
+
+  const moveSourcePointerDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const current = sourcePointerDragRef.current
+    if (current === undefined || current.pointerId !== event.pointerId) return
+    const active = current.active || Math.abs(event.clientY - current.startY) >= 4
+    const next = { ...current, currentY: event.clientY, active }
+    sourcePointerDragRef.current = next
+    setSourcePointerDrag(next)
+    if (!active) return
+    event.preventDefault()
+    setDraggingSourceCode(current.code)
+    setSourceDropTarget(sourceTargetAt(event.clientX, event.clientY, current.code))
+  }
+
+  const finishSourcePointerDrag = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const current = sourcePointerDragRef.current
+    if (current === undefined || current.pointerId !== event.pointerId) return
+    const target = current.active ? sourceTargetAt(event.clientX, event.clientY, current.code) : undefined
+    sourcePointerDragRef.current = undefined
+    setSourcePointerDrag(undefined)
+    setDraggingSourceCode(undefined)
+    setSourceDropTarget(undefined)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    if (target !== undefined) dropSource(target.code, target.after, current.code)
+  }
+
+  const cancelSourcePointerDrag = (): void => {
+    sourcePointerDragRef.current = undefined
+    setSourcePointerDrag(undefined)
+    setDraggingSourceCode(undefined)
+    setSourceDropTarget(undefined)
+  }
+
   const translate = async (topic: TopicView): Promise<void> => {
     setTranslations((cur) => ({ ...cur, [topic.id]: { loading: true } }))
     try {
@@ -601,6 +831,24 @@ export function App() {
     } catch (reason) {
       setTranslations((cur) => ({ ...cur, [topic.id]: { error: reason instanceof Error ? reason.message : String(reason) } }))
     }
+  }
+
+  /** A provider preset fills both routing fields; custom mode leaves them editable. */
+  const changeModelProvider = (value: string): void => {
+    const providerId = value as ModelProviderId
+    setModelProvider(providerId)
+    const preset = MODEL_PROVIDER_PRESETS.find((provider) => provider.id === providerId)
+    if (preset === undefined) return
+    setModelEndpoint(preset.endpoint)
+    setModelName(preset.models[0] ?? '')
+  }
+
+  const changeModelPreset = (value: string): void => {
+    if (value === '__custom__') {
+      if (modelUsesPreset) setModelName('')
+      return
+    }
+    setModelName(value)
   }
 
   const saveSettings = async (): Promise<void> => {
@@ -647,6 +895,15 @@ export function App() {
   const switchView = (next: ViewMode): void => {
     if (next === 'settings' && view !== 'settings') {
       setPrevView(view as Exclude<ViewMode, 'settings'>)
+    }
+    // The sidebar badge is the global recent-addition count. Do not carry a
+    // Discover-page filter into Recent Additions and make its list look incomplete.
+    if (next === 'new' && view !== 'new') {
+      setSource('all')
+      setRegion('all')
+      setCategory('all')
+      setSearch('')
+      setSearchOpen(false)
     }
     setNotice(undefined); setError(undefined)
     setView(next); setPageIndex(0)
@@ -714,7 +971,7 @@ export function App() {
         <div className="settings-layout">
           {/* Left tab nav */}
           <nav className="settings-tabs" aria-label={m.settingsTitle}>
-            {(['general', 'sources', 'model', 'storage', 'network'] as SettingsTab[]).map((tab) => {
+            {(['general', 'sources', 'model', 'network', 'storage'] as SettingsTab[]).map((tab) => {
               const TabIcon = tabIcons[tab]
               return (
                 <button
@@ -809,20 +1066,36 @@ export function App() {
                 </header>
 
                 {sourceDraft !== undefined && editingSourceCode === undefined ? renderSourceEditor() : null}
-                <div className="source-list">
+                <div className="source-list" aria-busy={reorderingSources}>
                   {sourceConfigs.map((sourceConfig) => {
                     const status = page?.statuses.find((item) => item.code === sourceConfig.code)
-                    return <div className="source-list-item" key={sourceConfig.code}>
-                      <div className="source-row">
+                    return <div
+                      className={`source-list-item${draggingSourceCode === sourceConfig.code ? ' dragging' : ''}${sourceDropTarget?.code === sourceConfig.code ? (sourceDropTarget.after ? ' drop-after' : ' drop-before') : ''}`}
+                      key={sourceConfig.code}
+                      data-source-code={sourceConfig.code}
+                    >
+                      <div
+                        className={`source-row${sourcePointerDrag?.code === sourceConfig.code && sourcePointerDrag.active ? ' pointer-dragging' : ''}`}
+                        style={sourcePointerDrag?.code === sourceConfig.code && sourcePointerDrag.active ? { transform: `translateY(${sourcePointerDrag.currentY - sourcePointerDrag.startY}px)` } : undefined}
+                        onPointerDown={(event) => beginSourcePointerDrag(event, sourceConfig.code)}
+                        onPointerMove={moveSourcePointerDrag}
+                        onPointerUp={finishSourcePointerDrag}
+                        onPointerCancel={cancelSourcePointerDrag}
+                      >
+                        <span
+                          className="source-drag-handle"
+                          aria-hidden="true"
+                          title={m.sourceDragToReorder}
+                        ><GripVertical aria-hidden="true" /></span>
                         <span className={`health-dot ${status?.status === 'failed' ? 'failed' : status?.status === 'succeeded' ? 'healthy' : ''}`} />
                         <div className="source-row-info">
-                          <span className="source-row-name">{sourceConfig.displayName}<small className="source-kind">{sourceConfig.builtIn ? m.sourceBuiltIn : m.sourceCustom} · {sourceConfig.parserType.toUpperCase()}</small></span>
+                          <span className="source-row-name">{sourceConfig.displayName}<small className="source-kind">{sourceConfig.builtIn ? m.sourceBuiltIn : `${m.sourceCustom} · ${sourceConfig.parserType.toUpperCase()}`}</small></span>
                           <span className="source-row-meta" title={status?.error ?? undefined}>{sourceConfig.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status?.error ?? (status?.lastRunAt == null ? m.notCollected : m.topicCount(status.topicCount))}</span>
                         </div>
                         {sourceConfig.code === 'xiaohongshu' ? <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button> : null}
                         <button className="source-icon-action" type="button" title={m.sourceImport} onClick={() => void importSources(sourceConfig.code)}><Download aria-hidden="true" /></button>
                         <button className="source-icon-action" type="button" title={m.sourceExport} onClick={() => void exportSources(sourceConfig.code)}><Upload aria-hidden="true" /></button>
-                        <button className="source-icon-action" type="button" title={m.sourceEdit} onClick={() => editSource(sourceConfig)}><Pencil aria-hidden="true" /></button>
+                        <button className={`source-icon-action${editingSourceCode === sourceConfig.code ? ' active' : ''}`} type="button" title={m.sourceEdit} aria-expanded={editingSourceCode === sourceConfig.code} onClick={() => editSource(sourceConfig)}><Pencil aria-hidden="true" /></button>
                         <button className="source-icon-action danger" type="button" title={m.sourceDeleteConfirm(sourceConfig.displayName)} onClick={() => void removeSource(sourceConfig)}><Trash2 aria-hidden="true" /></button>
                         <label className="switch"><input type="checkbox" checked={sourceConfig.enabled} onChange={(e) => void changePlatform(sourceConfig.code, e.target.checked)} /><span /></label>
                       </div>
@@ -870,14 +1143,28 @@ export function App() {
               <div className="settings-page">
                 <header className="settings-page-header"><div><h2>{m.modelHeading}</h2><p>{m.modelDesc}</p></div></header>
                 <div className="settings-surface settings-card">
+                  <div className="model-preset-grid">
+                    <FilterDropdown
+                      label={m.labelModelProvider}
+                      value={modelProvider}
+                      options={[...MODEL_PROVIDER_PRESETS.map((provider) => ({ value: provider.id, label: provider.label })), { value: 'custom', label: m.modelCustomProvider }]}
+                      onChange={changeModelProvider}
+                    />
+                    <FilterDropdown
+                      label={m.labelModel}
+                      value={modelUsesPreset ? modelName : '__custom__'}
+                      options={[...(selectedModelProvider?.models.map((model) => ({ value: model, label: model })) ?? []), { value: '__custom__', label: m.modelCustomName }]}
+                      onChange={changeModelPreset}
+                    />
+                  </div>
                   <label>
                     <span>{m.labelEndpoint}</span>
-                    <input value={modelEndpoint} onChange={(e) => setModelEndpoint(e.target.value)} placeholder="https://api.deepseek.com" />
+                    <input value={modelEndpoint} readOnly={modelProvider !== 'custom'} onChange={(e) => setModelEndpoint(e.target.value)} placeholder="https://api.example.com/v1" />
                   </label>
-                  <label>
+                  {!modelUsesPreset ? <label>
                     <span>{m.labelModel}</span>
-                    <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="deepseek-chat" />
-                  </label>
+                    <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="model-name" />
+                  </label> : null}
                   <label>
                     <span>{m.labelApiKey}</span>
                     <input
@@ -938,21 +1225,40 @@ export function App() {
         <header className="topbar">
           <div className="topbar-main">
             <h1>{viewTitle}</h1>
-            <label className="topbar-search">
-              <Search aria-hidden="true" />
-              <input
+            <div className={`topbar-search${searchOpen ? ' expanded' : ''}${search.trim() === '' ? '' : ' has-value'}`}>
+              <button
+                className="topbar-search-toggle"
+                type="button"
                 aria-label={m.filterSearch}
+                aria-expanded={searchOpen}
+                title={m.filterSearch}
+                onClick={() => {
+                  setSearchOpen(true)
+                  requestAnimationFrame(() => searchInputRef.current?.focus())
+                }}
+              ><Search aria-hidden="true" /></button>
+              <input
+                ref={searchInputRef}
+                aria-label={m.filterSearch}
+                tabIndex={searchOpen ? 0 : -1}
                 value={search}
                 placeholder={m.filterSearchPlaceholder}
                 onChange={(e) => { setSearch(e.target.value); setPageIndex(0) }}
+                onBlur={() => setSearchOpen(false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    setSearchOpen(false)
+                    event.currentTarget.blur()
+                  }
+                }}
               />
-            </label>
+            </div>
           </div>
           <div className="topbar-actions">
-            <button className={`query-button topbar-icon-button${loading ? ' busy' : ''}`} type="button" disabled={loading || refreshing} aria-label={loading ? m.btnQuerying : m.btnQuery} title={loading ? m.btnQuerying : m.btnQuery} onClick={() => void load()}>
+            <button className={`query-button topbar-icon-button${loading ? ' active busy' : ''}`} type="button" disabled={loading || refreshing} aria-label={loading ? m.btnQuerying : m.btnQuery} title={loading ? m.btnQuerying : m.btnQuery} onClick={() => void load()}>
               <RefreshCw aria-hidden="true" />
             </button>
-            <button className={`primary-button topbar-icon-button collect-button${refreshing ? ' busy' : ''}`} type="button" disabled={refreshing} aria-label={refreshing ? m.btnRefreshing : m.btnRefresh} title={refreshing ? m.btnRefreshing : m.btnRefresh} onClick={() => void collect()}>
+            <button className={`query-button topbar-icon-button collect-button${refreshing ? ' active busy' : ''}`} type="button" disabled={refreshing} aria-label={refreshing ? m.btnRefreshing : m.btnRefresh} title={refreshing ? m.btnRefreshing : m.btnRefresh} onClick={() => void collect()}>
               <Radar aria-hidden="true" />
             </button>
             <button className={`side-panel-toggle topbar-icon-button${browserOpen ? ' active' : ''}`} type="button" aria-label={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} aria-pressed={browserOpen} title={locale === 'zh' ? '显示/隐藏浏览器' : 'Show/hide browser'} onClick={toggleBrowser}><PanelRight aria-hidden="true" /></button>
@@ -961,42 +1267,10 @@ export function App() {
 
         <div className="list-sticky-controls">
           <section className="filters" aria-label={m.filterSearch}>
-            <label>
-              <span>{m.filterSource}</span>
-              <select value={source} onChange={(e) => { setSource(e.target.value); setPageIndex(0) }}>
-                <option value="all">{m.filterAllSources}</option>
-                {page?.statuses.map((s) => <option key={s.code} value={s.code}>{s.displayName}</option>)}
-              </select>
-              <ChevronDown className="filter-chevron" aria-hidden="true" />
-            </label>
-            <label>
-              <span>{m.filterRegion}</span>
-              <select value={region} onChange={(e) => { setRegion(e.target.value as typeof region); setPageIndex(0) }}>
-                <option value="all">{m.filterAllRegions}</option>
-                <option value="domestic">{m.filterDomestic}</option>
-                <option value="international">{m.filterInternational}</option>
-              </select>
-              <ChevronDown className="filter-chevron" aria-hidden="true" />
-            </label>
-            <label>
-              <span>{m.filterCategory}</span>
-              <select value={category} onChange={(e) => { setCategory(e.target.value as typeof category); setPageIndex(0) }}>
-                <option value="all">{m.filterAllCategories}</option>
-                <option value="general">{m.filterGeneral}</option>
-                <option value="technology">{m.filterTech}</option>
-                <option value="finance">{m.filterFinance}</option>
-                <option value="developer">{m.filterDev}</option>
-              </select>
-              <ChevronDown className="filter-chevron" aria-hidden="true" />
-            </label>
-            <label>
-              <span>{m.filterSort}</span>
-              <select value={sort} onChange={(e) => { setSort(e.target.value as typeof sort); setPageIndex(0) }}>
-                <option value="rank">{m.filterSortRank}</option>
-                <option value="updated">{m.filterSortUpdated}</option>
-              </select>
-              <ChevronDown className="filter-chevron" aria-hidden="true" />
-            </label>
+            <FilterDropdown label={m.filterRegion} value={region} options={[{ value: 'all', label: m.filterAllRegions }, ...enabledSourceConfigs.some((item) => item.region === 'domestic') ? [{ value: 'domestic', label: m.filterDomestic }] : [], ...enabledSourceConfigs.some((item) => item.region === 'international') ? [{ value: 'international', label: m.filterInternational }] : []]} onChange={(value) => { setRegion(value as typeof region); setPageIndex(0) }} />
+            <FilterDropdown label={m.filterCategory} value={category} options={[{ value: 'all', label: m.filterAllCategories }, ...regionSourceConfigs.some((item) => item.category === 'general') ? [{ value: 'general', label: m.filterGeneral }] : [], ...regionSourceConfigs.some((item) => item.category === 'technology') ? [{ value: 'technology', label: m.filterTech }] : [], ...regionSourceConfigs.some((item) => item.category === 'finance') ? [{ value: 'finance', label: m.filterFinance }] : [], ...regionSourceConfigs.some((item) => item.category === 'developer') ? [{ value: 'developer', label: m.filterDev }] : []]} onChange={(value) => { setCategory(value as typeof category); setPageIndex(0) }} />
+            <FilterDropdown label={m.filterSource} value={source} options={[{ value: 'all', label: m.filterAllSources }, ...linkedSourceConfigs.map((item) => ({ value: item.code, label: item.displayName, removable: true }))]} onChange={(value) => { setSource(value); setPageIndex(0) }} onRemove={(code) => changePlatform(code, false)} removeLabel={(option) => m.filterDisableSource(option.label)} />
+            <FilterDropdown label={m.filterSort} value={sort} options={[{ value: 'rank', label: m.filterSortRank }, { value: 'updated', label: m.filterSortUpdated }]} onChange={(value) => { setSort(value as typeof sort); setPageIndex(0) }} />
           </section>
           <div className="results-heading">
             <span>{m.resultsTotal(page?.total ?? 0)}</span>
@@ -1021,6 +1295,7 @@ export function App() {
               displayRank={source === 'all' ? topic.globalRank : topic.rank}
               {...(translations[topic.id] === undefined ? {} : { translation: translations[topic.id] })}
               onQueueChange={changeQueue} onTranslate={translate}
+              {...(view === 'discover' ? { onHide: hideDislikedTopic } : {})}
               onOpen={openTopic} selected={browserTabs.find((tab) => tab.id === activeBrowserTabId)?.topicId === topic.id}
             />
           )) : null}

@@ -24,6 +24,11 @@ export async function setTopicQueued(topicId: number, queued: boolean): Promise<
   await invoke('set_topic_queued', { topicId, queued })
 }
 
+/** Permanently hide one topic identity from lists and subsequent syncs. */
+export async function hideTopic(topicId: number): Promise<void> {
+  await invoke('hide_topic', { topicId })
+}
+
 /** Persist one source switch while keeping historical rows available locally. */
 export async function setPlatformEnabled(code: string, enabled: boolean): Promise<void> {
   await invoke('set_platform_enabled', { code, enabled })
@@ -32,6 +37,11 @@ export async function setPlatformEnabled(code: string, enabled: boolean): Promis
 /** Load source definitions for the native-only collection engine. */
 export async function listSourceConfigurations(): Promise<SourceConfiguration[]> {
   return invoke<SourceConfiguration[]>('list_source_configurations')
+}
+
+/** Persist an exact custom display order for all active source definitions. */
+export async function reorderSourceConfigurations(codes: string[]): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('reorder_source_configurations', { codes })
 }
 
 /** Create or update a validated RSS, JSON or HTML source. */

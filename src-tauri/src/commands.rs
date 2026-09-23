@@ -94,6 +94,12 @@ pub fn set_topic_queued(
     with_repository(&state, |repository| repository.set_queued(topic_id, queued))
 }
 
+/// Hide one disliked topic and blacklist its stable identity from later syncs.
+#[tauri::command]
+pub fn hide_topic(state: State<'_, AppState>, topic_id: i64) -> Result<(), String> {
+    with_repository(&state, |repository| repository.hide_topic(topic_id))
+}
+
 /// Enable or disable one known source without changing its history.
 #[tauri::command]
 pub fn set_platform_enabled(
@@ -112,6 +118,18 @@ pub fn list_source_configurations(
     state: State<'_, AppState>,
 ) -> Result<Vec<SourceConfiguration>, String> {
     with_repository(&state, |repository| repository.source_configurations())
+}
+
+/// Persist an exact user-defined order after the native layer validates the permutation.
+#[tauri::command]
+pub fn reorder_source_configurations(
+    state: State<'_, AppState>,
+    codes: Vec<String>,
+) -> Result<Vec<SourceConfiguration>, String> {
+    with_repository(&state, |repository| {
+        repository.reorder_source_configurations(&codes)?;
+        repository.source_configurations()
+    })
 }
 
 /// Validate and persist a declarative source without allowing executable configuration.

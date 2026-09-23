@@ -9,6 +9,10 @@ pub struct PlatformDefinition {
     pub endpoint_url: &'static str,
 }
 
+/// Built-in source codes removed from the product but retained here so existing
+/// databases can hide them without deleting historical topics.
+pub const RETIRED_PLATFORM_CODES: &[&str] = &["mastodon-zh"];
+
 /// Stable built-in region used only when a catalog source is first inserted.
 pub fn default_region(code: &str) -> &'static str {
     if matches!(
@@ -78,7 +82,6 @@ pub fn default_proxy_mode(code: &str) -> &'static str {
         code,
         "binance-square-zh"
             | "binance-square-global"
-            | "mastodon-zh"
             | "mastodon-global"
             | "coingecko"
             | "github"
@@ -116,7 +119,6 @@ pub const PLATFORM_CATALOG: &[PlatformDefinition] = &[
     PlatformDefinition { code: "hacker-news", display_name: "Hacker News", home_url: "https://news.ycombinator.com/", endpoint_url: "https://hacker-news.firebaseio.com/v0" },
     PlatformDefinition { code: "wikipedia-zh", display_name: "Wikipedia 中文", home_url: "https://zh.wikipedia.org/", endpoint_url: "https://wikimedia.org/api/rest_v1/metrics/pageviews/top/zh.wikipedia/all-access" },
     PlatformDefinition { code: "wikipedia-global", display_name: "Wikipedia 全球", home_url: "https://en.wikipedia.org/", endpoint_url: "https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access" },
-    PlatformDefinition { code: "mastodon-zh", display_name: "Mastodon 中文", home_url: "https://m.cmx.im/", endpoint_url: "https://m.cmx.im/api/v1/trends/statuses?limit=40" },
     PlatformDefinition { code: "mastodon-global", display_name: "Mastodon 全球", home_url: "https://mastodon.social/", endpoint_url: "https://mastodon.social/api/v1/trends/links?limit=40" },
     PlatformDefinition { code: "google-trends-zh", display_name: "Google Trends 中文", home_url: "https://trends.google.com/trending?geo=TW", endpoint_url: "https://trends.google.com/trending/rss?geo=TW" },
     PlatformDefinition { code: "google-trends-global", display_name: "Google Trends 全球", home_url: "https://trends.google.com/trending?geo=US", endpoint_url: "https://trends.google.com/trending/rss?geo=US" },

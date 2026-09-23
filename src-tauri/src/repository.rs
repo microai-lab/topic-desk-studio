@@ -1,6 +1,6 @@
 //! SQLite repository for topic pages, source health and persistent creation queue.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
@@ -329,6 +329,30 @@ impl<'connection> TopicRepository<'connection> {
         Ok(())
     }
 
+    /// Permanently hide one topic identity from presentation and future feed commits.
+    /// Historical observations remain available for storage integrity and backups.
+    pub fn hide_topic(&self, topic_id: i64) -> AppResult<()> {
+        if topic_id <= 0 {
+            return Err(AppError::InvalidInput("topicId 必须是正整数".into()));
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE topic SET deleted = 1, update_time = datetime('now', 'localtime')
+             WHERE id = ? AND deleted = 0",
+            [topic_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::InvalidInput("话题不存在或已隐藏".into()));
+        }
+        transaction.execute(
+            "UPDATE creation_queue SET deleted = 1, update_time = datetime('now', 'localtime')
+             WHERE topic_id = ? AND deleted = 0",
+            [topic_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Persist a user's source toggle; catalog synchronization intentionally preserves this value.
     pub fn set_platform_enabled(&self, code: &str, enabled: bool) -> AppResult<()> {
         let changed = self.connection.execute(
@@ -399,7 +423,59 @@ impl<'connection> TopicRepository<'connection> {
                     .unwrap_or_default(),
             });
         }
+        let configured_order = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = 'source_display_order'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .map_err(|error| AppError::Initialization(format!("数据源排序配置损坏：{error}")))?
+            .unwrap_or_default();
+        let positions = configured_order
+            .iter()
+            .enumerate()
+            .map(|(index, code)| (code.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        if !positions.is_empty() {
+            // Sources added after the last manual reorder stay behind the saved
+            // sequence and retain their database insertion order.
+            sources.sort_by_key(|source| {
+                positions
+                    .get(source.code.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
         Ok(sources)
+    }
+
+    /// Persist one exact permutation of all active sources as a non-secret UI preference.
+    pub fn reorder_source_configurations(&self, codes: &[String]) -> AppResult<()> {
+        let active = self
+            .source_configurations()?
+            .into_iter()
+            .map(|source| source.code)
+            .collect::<HashSet<_>>();
+        let requested = codes.iter().cloned().collect::<HashSet<_>>();
+        if codes.len() != active.len() || requested.len() != codes.len() || requested != active {
+            return Err(AppError::InvalidInput(
+                "数据源排序必须且只能包含全部当前来源".into(),
+            ));
+        }
+        let value = serde_json::to_string(codes)
+            .map_err(|error| AppError::InvalidInput(format!("数据源排序序列化失败：{error}")))?;
+        self.connection.execute(
+            "INSERT INTO app_setting (key, value, update_time)
+             VALUES ('source_display_order', ?, datetime('now', 'localtime'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+               update_time = datetime('now', 'localtime')",
+            [value],
+        )?;
+        Ok(())
     }
 
     /// Upsert one validated definition while preserving whether an existing source is built in.
@@ -563,7 +639,7 @@ impl<'connection> TopicRepository<'connection> {
         };
         Ok(ModelSettings {
             endpoint: value("model_endpoint", "https://api.deepseek.com")?,
-            model: value("model_name", "deepseek-chat")?,
+            model: value("model_name", "deepseek-flash")?,
             has_api_key: self.encrypted_api_key()?.is_some(),
         })
     }
@@ -729,7 +805,7 @@ impl<'connection> TopicRepository<'connection> {
             let identity = identify_topic(topic)?;
             let existing = transaction
                 .query_row(
-                    "SELECT id, source_key, identity_kind, title FROM topic
+                    "SELECT id, source_key, identity_kind, title, deleted FROM topic
                      WHERE platform_id = ? AND dedupe_hash = ?",
                     params![platform.id, identity.hash.as_slice()],
                     |row| {
@@ -738,59 +814,66 @@ impl<'connection> TopicRepository<'connection> {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)? != 0,
                         ))
                     },
                 )
                 .optional()?;
-            let topic_id = if let Some((id, source_key, identity_kind, stored_title)) = existing {
-                if source_key != identity.source_key || identity_kind != identity.kind {
-                    return Err(AppError::Initialization(format!(
-                        "检测到去重哈希冲突：{}/{}",
-                        platform.code, identity.source_key
-                    )));
-                }
-                if should_repair_legacy_title(&platform.code, &stored_title, &topic.title) {
-                    transaction.execute(
+            let topic_id =
+                if let Some((id, source_key, identity_kind, stored_title, hidden)) = existing {
+                    if source_key != identity.source_key || identity_kind != identity.kind {
+                        return Err(AppError::Initialization(format!(
+                            "检测到去重哈希冲突：{}/{}",
+                            platform.code, identity.source_key
+                        )));
+                    }
+                    // A user-hidden identity is a durable exclusion rule: later
+                    // collection runs neither resurrect it nor append observations.
+                    if hidden {
+                        continue;
+                    }
+                    if should_repair_legacy_title(&platform.code, &stored_title, &topic.title) {
+                        transaction.execute(
                         "UPDATE topic SET title = ?, rank = ?, heat = ?, last_collection_run_id = ?,
                            deleted = 0, update_time = datetime('now', 'localtime') WHERE id = ?",
                         params![topic.title, topic.rank, topic.heat, run_id, id],
                     )?;
+                    } else {
+                        transaction.execute(
+                            "UPDATE topic SET rank = ?, heat = ?, last_collection_run_id = ?,
+                           deleted = 0, update_time = datetime('now', 'localtime') WHERE id = ?",
+                            params![topic.rank, topic.heat, run_id, id],
+                        )?;
+                    }
+                    stats.updated += 1;
+                    id
                 } else {
                     transaction.execute(
-                        "UPDATE topic SET rank = ?, heat = ?, last_collection_run_id = ?,
-                           deleted = 0, update_time = datetime('now', 'localtime') WHERE id = ?",
-                        params![topic.rank, topic.heat, run_id, id],
-                    )?;
-                }
-                stats.updated += 1;
-                id
-            } else {
-                transaction.execute(
-                    "INSERT INTO topic (
+                        "INSERT INTO topic (
                        platform_id, source_key, identity_kind, dedupe_version, dedupe_hash,
                        title, canonical_url, published_time, rank, heat, last_collection_run_id,
                        create_time, update_time
                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                datetime('now', 'localtime'), datetime('now', 'localtime'))",
-                    params![
-                        platform.id,
-                        identity.source_key,
-                        identity.kind,
-                        identity.version,
-                        identity.hash.as_slice(),
-                        topic.title,
-                        topic.url,
-                        topic.published_time,
-                        topic.rank,
-                        topic.heat,
-                        run_id
-                    ],
-                )?;
-                let id = transaction.last_insert_rowid();
-                stats.inserted += 1;
-                stats.inserted_topic_ids.push(id);
-                id
-            };
+                        params![
+                            platform.id,
+                            identity.source_key,
+                            identity.kind,
+                            identity.version,
+                            identity.hash.as_slice(),
+                            topic.title,
+                            topic.url,
+                            topic.published_time,
+                            topic.rank,
+                            topic.heat,
+                            run_id
+                        ],
+                    )?;
+                    let id = transaction.last_insert_rowid();
+                    stats.inserted += 1;
+                    stats.inserted_topic_ids.push(id);
+                    id
+                };
             transaction.execute(
                 "INSERT INTO topic_observation (
                    topic_id, collection_run_id, rank, heat, create_time, update_time
@@ -1059,14 +1142,31 @@ impl<'connection> TopicRepository<'connection> {
                 topic_count,
             });
         }
-        // Keep healthy sources easiest to reach in both settings and filters.
-        // Within the same connectivity group, a larger current board is more
-        // useful; Rust's stable sort preserves catalog order for exact ties.
-        statuses.sort_by(|left, right| {
-            source_connectivity_rank(left.status.as_deref())
-                .cmp(&source_connectivity_rank(right.status.as_deref()))
-                .then_with(|| right.topic_count.cmp(&left.topic_count))
-        });
+        let configured_order = self
+            .connection
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = 'source_display_order'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .map_err(|error| AppError::Initialization(format!("数据源排序配置损坏：{error}")))?
+            .unwrap_or_default();
+        let positions = configured_order
+            .iter()
+            .enumerate()
+            .map(|(index, code)| (code.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        if !positions.is_empty() {
+            statuses.sort_by_key(|status| {
+                positions
+                    .get(status.code.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
         Ok(statuses)
     }
 }
@@ -1122,11 +1222,6 @@ fn upsert_source_configuration(
 }
 
 /// A completed successful collection is the only positive connectivity proof;
-/// unknown, running and failed states stay in the secondary group.
-fn source_connectivity_rank(status: Option<&str>) -> u8 {
-    u8::from(status != Some("succeeded"))
-}
-
 /// Repair titles irreversibly damaged by the early C114 UTF-8 decoder without rewriting valid first-seen text.
 fn should_repair_legacy_title(platform_code: &str, stored: &str, incoming: &str) -> bool {
     platform_code == "c114" && stored.contains('\u{fffd}') && !incoming.contains('\u{fffd}')
@@ -1154,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn source_statuses_put_reachable_and_larger_boards_first() {
+    fn source_statuses_follow_saved_manual_order() {
         let connection = fixture();
         for (code, name) in [
             ("sspai", "少数派"),
@@ -1180,31 +1275,22 @@ mod tests {
             )
             .expect("runs should insert");
 
+        connection
+            .execute(
+                "INSERT INTO app_setting (key, value) VALUES ('source_display_order', ?)",
+                [r#"["ithome","hackernews","qbitai","sspai"]"#],
+            )
+            .expect("manual source order should save");
+
         let repository = TopicRepository::new(&connection);
-        let mut statuses = repository.statuses().expect("statuses should load");
-        // Supply representative board sizes directly so this unit test focuses
-        // on the ordering contract rather than feed-commit mechanics.
-        for status in &mut statuses {
-            status.topic_count = match status.code.as_str() {
-                "sspai" => 30,
-                "qbitai" => 10,
-                "hackernews" => 100,
-                "ithome" => 50,
-                _ => 0,
-            };
-        }
-        statuses.sort_by(|left, right| {
-            source_connectivity_rank(left.status.as_deref())
-                .cmp(&source_connectivity_rank(right.status.as_deref()))
-                .then_with(|| right.topic_count.cmp(&left.topic_count))
-        });
+        let statuses = repository.statuses().expect("statuses should load");
 
         assert_eq!(
             statuses
                 .iter()
                 .map(|status| status.code.as_str())
                 .collect::<Vec<_>>(),
-            vec!["sspai", "qbitai", "hackernews", "ithome"]
+            vec!["ithome", "hackernews", "qbitai", "sspai"]
         );
     }
 
@@ -1253,6 +1339,49 @@ mod tests {
             })
             .expect("trigram title search should load");
         assert_eq!(searched.total, 1);
+    }
+
+    /// Hiding a topic is durable: the same identity is ignored by later syncs.
+    #[test]
+    fn hidden_topics_are_skipped_during_recollection() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let feed = ParsedFeed {
+            topics: vec![CollectedTopic {
+                platform_code: "qbitai".into(),
+                stable_id: Some("hidden-story".into()),
+                title: "不再感兴趣的话题".into(),
+                url: "https://www.qbitai.com/hidden-story".into(),
+                published_time: None,
+                rank: 1,
+                heat: None,
+            }],
+            fetched_count: 1,
+            invalid_count: 0,
+        };
+        let first_run = repository.create_run(platform.id, "test").unwrap();
+        let first = repository
+            .commit_feed(&platform, first_run, &feed)
+            .expect("first feed should insert");
+        let topic_id = first.inserted_topic_ids[0];
+        repository.hide_topic(topic_id).expect("topic should hide");
+
+        let second_run = repository.create_run(platform.id, "test").unwrap();
+        let second = repository
+            .commit_feed(&platform, second_run, &feed)
+            .expect("hidden identity should be skipped");
+
+        assert_eq!((second.inserted, second.updated), (0, 0));
+        assert_eq!(repository.list(&TopicQuery::default()).unwrap().total, 0);
+        let observations: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM topic_observation WHERE topic_id = ?",
+                [topic_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(observations, 1);
     }
 
     /// A fourth non-empty collection batch evicts only the oldest recent-addition batch.
@@ -1563,6 +1692,34 @@ mod tests {
         assert!(restored
             .iter()
             .any(|candidate| candidate.code == "retained-custom" && !candidate.built_in));
+    }
+
+    /// A custom source order must persist as an exact permutation and reject partial lists.
+    #[test]
+    fn persists_custom_source_order() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let mut codes = repository
+            .source_configurations()
+            .expect("sources should load")
+            .into_iter()
+            .map(|source| source.code)
+            .collect::<Vec<_>>();
+        codes.reverse();
+
+        repository
+            .reorder_source_configurations(&codes)
+            .expect("exact source order should save");
+        let saved = repository
+            .source_configurations()
+            .expect("ordered sources should load")
+            .into_iter()
+            .map(|source| source.code)
+            .collect::<Vec<_>>();
+        assert_eq!(saved, codes);
+        assert!(repository
+            .reorder_source_configurations(&codes[..codes.len() - 1])
+            .is_err());
     }
 
     /// Only a clean C114 recollection may replace a legacy title containing decoding loss.

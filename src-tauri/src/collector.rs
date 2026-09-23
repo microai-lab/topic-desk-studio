@@ -383,12 +383,10 @@ fn parse_json(code: &str, payload: &Value, endpoint: &str) -> AppResult<ParsedFe
         match code {
             "toutiao" | "zhihu" | "jin10" => array_at(payload, "data"),
             "coingecko" => array_at(payload, "coins"),
-            "hugging-face" | "polymarket" | "dev-community" | "mastodon-zh" | "mastodon-global" => {
-                payload
-                    .as_array()
-                    .map(|items| items.iter().collect())
-                    .unwrap_or_default()
-            }
+            "hugging-face" | "polymarket" | "dev-community" | "mastodon-global" => payload
+                .as_array()
+                .map(|items| items.iter().collect())
+                .unwrap_or_default(),
             "bluesky" => array_at(payload, "topics"),
             "stack-overflow" => array_at(payload, "items"),
             "binance-square-zh" | "binance-square-global" => payload
@@ -661,19 +659,6 @@ fn json_topic(code: &str, item: &Value, endpoint: &str, rank: usize) -> Option<C
                 unix_time(item.get("date")),
                 number(item.get("viewCount")),
             ),
-            "mastodon-zh" => {
-                let heat = ["replies_count", "reblogs_count", "favourites_count"]
-                    .into_iter()
-                    .map(|key| number(item.get(key)).unwrap_or(0.0))
-                    .sum();
-                (
-                    text(item.get("id")),
-                    text(item.get("content")).map(|value| plain_text(&value)),
-                    text(item.get("url")),
-                    text(item.get("created_at")),
-                    Some(heat),
-                )
-            }
             "mastodon-global" => {
                 let heat = item
                     .get("history")

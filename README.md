@@ -60,7 +60,7 @@ xattr -d com.apple.quarantine "/Applications/Topic\ Desk\ Studio.app"
 
 Translation is optional and disabled until configured. Model settings stay on the device, and the API key is encrypted locally without being exposed to the page. Only a title explicitly selected for translation is sent to the configured model service.
 
-The default compatible endpoint is `https://api.deepseek.com` with model `deepseek-chat`, but it can be replaced with another OpenAI-compatible service. A trusted local endpoint may be used without an API key.
+The default compatible endpoint is `https://api.deepseek.com` with model `deepseek-flash`. Built-in provider and model presets cover several mainstream cloud platforms and local Ollama, while any OpenAI-compatible service can still be configured manually. A trusted local endpoint may be used without an API key.
 
 ## Data and privacy
 

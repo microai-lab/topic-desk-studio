@@ -6,7 +6,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, MAIN_DB};
 use zeroize::Zeroizing;
 
-use crate::catalog::{default_category, default_proxy_mode, default_region, PLATFORM_CATALOG};
+use crate::catalog::{
+    default_category, default_proxy_mode, default_region, PLATFORM_CATALOG, RETIRED_PLATFORM_CODES,
+};
 use crate::credential_cipher::{CredentialCipher, EncryptedCredential, ALGORITHM, MASTER_KEY_FILE};
 use crate::error::{AppError, AppResult};
 
@@ -94,6 +96,16 @@ fn ensure_platforms(connection: &Connection) -> AppResult<()> {
             default_category(platform.code),
             default_proxy_mode(platform.code),
         ))?;
+    }
+    // Retired built-ins remain soft-deleted so existing topic history keeps its
+    // foreign-key target while the source no longer appears or gets collected.
+    for code in RETIRED_PLATFORM_CODES {
+        connection.execute(
+            "UPDATE platform SET deleted = 1, enabled = 0,
+               update_time = datetime('now', 'localtime')
+             WHERE code = ? AND built_in = 1",
+            [code],
+        )?;
     }
     Ok(())
 }
@@ -728,5 +740,37 @@ mod tests {
             )
             .expect("default source should remain stored");
         assert_eq!(deleted, 1);
+    }
+
+    /// Sources retired from the catalog must disappear from upgraded databases.
+    #[test]
+    fn catalog_seeding_retires_removed_defaults() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        initialize(&mut connection, Path::new("unused-test-key"))
+            .expect("schema should initialize");
+        connection
+            .execute(
+                "INSERT INTO platform (
+                   code, display_name, home_url, feed_url, region, category,
+                   parser_type, proxy_mode, built_in, enabled
+                 ) VALUES (
+                   'mastodon-zh', 'Mastodon 中文', 'https://m.cmx.im/',
+                   'https://m.cmx.im/api/v1/trends/statuses?limit=40',
+                   'international', 'general', 'builtin', 'proxy', 1, 1
+                 )",
+                [],
+            )
+            .expect("retired fixture should insert");
+
+        ensure_platforms(&connection).expect("catalog should retire removed defaults");
+
+        let state: (i64, i64) = connection
+            .query_row(
+                "SELECT deleted, enabled FROM platform WHERE code = 'mastodon-zh'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("retired source should remain stored for history");
+        assert_eq!(state, (1, 0));
     }
 }

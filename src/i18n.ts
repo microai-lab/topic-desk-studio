@@ -18,6 +18,7 @@ export interface Messages {
   // Filters
   filterSource: string
   filterAllSources: string
+  filterDisableSource: (name: string) => string
   filterRegion: string
   filterAllRegions: string
   filterDomestic: string
@@ -51,6 +52,9 @@ export interface Messages {
   queueAdd: string
   queueRemove: string
   saving: string
+  topicHide: string
+  topicHideConfirm: (title: string) => string
+  topicHidden: string
   // Pagination
   prev: string
   next: string
@@ -134,6 +138,7 @@ export interface Messages {
   sourceImportAll: string
   sourceExportAll: string
   sourceRestoreDefaults: string
+  sourceDragToReorder: string
   sourceImported: string
   sourceExported: string
   sourceDefaultsRestored: string
@@ -142,8 +147,11 @@ export interface Messages {
   // Model tab
   modelHeading: string
   modelDesc: string
+  labelModelProvider: string
   labelEndpoint: string
   labelModel: string
+  modelCustomProvider: string
+  modelCustomName: string
   labelApiKey: string
   apiKeyPlaceholder: string
   apiKeySavedPlaceholder: string
@@ -163,6 +171,7 @@ const zh: Messages = {
   btnQuerying: '查询中…',
   filterSource: '来源',
   filterAllSources: '全部来源',
+  filterDisableSource: (name) => `关闭数据源“${name}”`,
   filterRegion: '地区',
   filterAllRegions: '全部地区',
   filterDomestic: '国内',
@@ -194,6 +203,9 @@ const zh: Messages = {
   queueAdd: '加入待创作',
   queueRemove: '移出待创作',
   saving: '保存中…',
+  topicHide: '不再显示',
+  topicHideConfirm: (title) => `不再显示“${title}”？后续同步遇到相同选题时也会自动跳过。`,
+  topicHidden: '该选题已隐藏，后续同步将跳过相同内容。',
   prev: '上一页',
   next: '下一页',
   settingsTitle: '设置',
@@ -203,7 +215,7 @@ const zh: Messages = {
   tabModel: '翻译模型',
   tabStorage: '本地数据',
   settingsGeneralDesc: '调整界面外观与语言偏好，设置会自动保存在本机。',
-  settingsSourcesDesc: '管理采集来源、解析方式和单独的网络路由。',
+  settingsSourcesDesc: '管理采集来源、解析方式、单独的网络路由和显示顺序。',
   settingsNetworkDesc: '设置采集服务使用的本地代理地址和连接策略。',
   sectionAppearance: '外观',
   labelTheme: '主题',
@@ -245,7 +257,7 @@ const zh: Messages = {
   sourceAdd: '添加数据源',
   sourceEdit: '编辑数据源',
   sourceCustom: '自定义',
-  sourceBuiltIn: '内置',
+  sourceBuiltIn: '默认',
   sourceCode: '来源代码',
   sourceName: '显示名称',
   sourceHome: '网站首页',
@@ -272,6 +284,7 @@ const zh: Messages = {
   sourceImportAll: '批量导入',
   sourceExportAll: '批量导出',
   sourceRestoreDefaults: '恢复默认来源',
+  sourceDragToReorder: '拖动调整数据源顺序',
   sourceImported: '数据源导入完成。',
   sourceExported: '数据源文件已导出。',
   sourceDefaultsRestored: '默认数据源已恢复。',
@@ -279,8 +292,11 @@ const zh: Messages = {
   sourceRestoreConfirm: '恢复全部默认数据源？已修改的默认来源会重置，但自定义来源和历史话题不会删除。',
   modelHeading: '英文标题翻译',
   modelDesc: '接口地址与模型名保存在本地 SQLite；API Key 加密后入库，仅在调用模型时于内存解密。',
+  labelModelProvider: '算力平台',
   labelEndpoint: '接口地址',
   labelModel: '模型名称',
+  modelCustomProvider: '自定义兼容接口',
+  modelCustomName: '自定义模型',
   labelApiKey: 'API Key',
   apiKeyPlaceholder: '输入后加密保存到本地 SQLite',
   apiKeySavedPlaceholder: '已保存；留空表示不修改',
@@ -300,6 +316,7 @@ const en: Messages = {
   btnQuerying: 'Querying…',
   filterSource: 'Source',
   filterAllSources: 'All sources',
+  filterDisableSource: (name) => `Disable source “${name}”`,
   filterRegion: 'Region',
   filterAllRegions: 'All regions',
   filterDomestic: 'China',
@@ -331,6 +348,9 @@ const en: Messages = {
   queueAdd: 'Add to queue',
   queueRemove: 'Remove',
   saving: 'Saving…',
+  topicHide: 'Hide permanently',
+  topicHideConfirm: (title) => `Hide “${title}”? Future syncs will also skip the same topic.`,
+  topicHidden: 'Topic hidden. Future syncs will skip the same content.',
   prev: 'Previous',
   next: 'Next',
   settingsTitle: 'Settings',
@@ -340,7 +360,7 @@ const en: Messages = {
   tabModel: 'Translation',
   tabStorage: 'Local data',
   settingsGeneralDesc: 'Adjust appearance and language preferences. Changes are saved locally.',
-  settingsSourcesDesc: 'Manage collection sources, parsers, and per-source network routing.',
+  settingsSourcesDesc: 'Manage collection sources, parsers, per-source routing, and display order.',
   settingsNetworkDesc: 'Configure the local proxy address and connection policy used for collection.',
   sectionAppearance: 'Appearance',
   labelTheme: 'Theme',
@@ -382,7 +402,7 @@ const en: Messages = {
   sourceAdd: 'Add source',
   sourceEdit: 'Edit source',
   sourceCustom: 'Custom',
-  sourceBuiltIn: 'Built-in',
+  sourceBuiltIn: 'Default',
   sourceCode: 'Source code',
   sourceName: 'Display name',
   sourceHome: 'Home page',
@@ -409,6 +429,7 @@ const en: Messages = {
   sourceImportAll: 'Import all',
   sourceExportAll: 'Export all',
   sourceRestoreDefaults: 'Restore defaults',
+  sourceDragToReorder: 'Drag to reorder sources',
   sourceImported: 'Source import completed.',
   sourceExported: 'Source file exported.',
   sourceDefaultsRestored: 'Default sources restored.',
@@ -416,8 +437,11 @@ const en: Messages = {
   sourceRestoreConfirm: 'Restore all default sources? Modified defaults will be reset, while custom sources and historical topics stay intact.',
   modelHeading: 'Title Translation',
   modelDesc: 'Endpoint and model name are stored in SQLite. The API key is encrypted at rest and decrypted in memory only for model calls.',
+  labelModelProvider: 'Provider',
   labelEndpoint: 'Endpoint',
   labelModel: 'Model',
+  modelCustomProvider: 'Custom compatible endpoint',
+  modelCustomName: 'Custom model',
   labelApiKey: 'API Key',
   apiKeyPlaceholder: 'Encrypted in local SQLite',
   apiKeySavedPlaceholder: 'Saved — leave blank to keep',
