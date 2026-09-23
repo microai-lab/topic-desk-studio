@@ -1,6 +1,8 @@
 /** 类型化 Tauri command 客户端，集中隔离前端与原生层通信细节。 */
 import { invoke } from '@tauri-apps/api/core'
-import type { ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
+import { open, save } from '@tauri-apps/plugin-dialog'
+import type { Locale } from './i18n'
+import type { ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
 
 /** 查询本地 SQLite 中的当前话题。 */
 export async function listTopics(query: TopicQuery): Promise<TopicPage> {
@@ -25,6 +27,56 @@ export async function setTopicQueued(topicId: number, queued: boolean): Promise<
 /** Persist one source switch while keeping historical rows available locally. */
 export async function setPlatformEnabled(code: string, enabled: boolean): Promise<void> {
   await invoke('set_platform_enabled', { code, enabled })
+}
+
+/** Load source definitions for the native-only collection engine. */
+export async function listSourceConfigurations(): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('list_source_configurations')
+}
+
+/** Create or update a validated RSS, JSON or HTML source. */
+export async function saveSourceConfiguration(source: SaveSourceConfiguration): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('save_source_configuration', { source })
+}
+
+/** Remove one source while retaining its historical topics. */
+export async function deleteSource(code: string): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('delete_source', { code })
+}
+
+/** Export one source or the complete active list through a native save dialog. */
+export async function exportSourceConfigurations(locale: Locale, code?: string): Promise<boolean> {
+  const chinese = locale === 'zh'
+  const path = await save({
+    title: code === undefined
+      ? (chinese ? '导出全部数据源' : 'Export all sources')
+      : (chinese ? `导出数据源 ${code}` : `Export source ${code}`),
+    defaultPath: code === undefined ? 'topic-desk-sources.json' : `topic-desk-source-${code}.json`,
+    filters: [{ name: chinese ? 'Topic Desk 数据源' : 'Topic Desk sources', extensions: ['json'] }],
+  })
+  if (path === null) return false
+  await invoke('export_source_configurations', { path, code: code ?? null })
+  return true
+}
+
+/** Import one source or a batch through a native file dialog. */
+export async function importSourceConfigurations(locale: Locale, targetCode?: string): Promise<SourceConfiguration[] | undefined> {
+  const chinese = locale === 'zh'
+  const path = await open({
+    title: targetCode === undefined
+      ? (chinese ? '批量导入数据源' : 'Import sources')
+      : (chinese ? `导入数据源 ${targetCode}` : `Import source ${targetCode}`),
+    multiple: false,
+    directory: false,
+    filters: [{ name: chinese ? 'Topic Desk 数据源' : 'Topic Desk sources', extensions: ['json'] }],
+  })
+  if (path === null) return undefined
+  return invoke<SourceConfiguration[]>('import_source_configurations', { path, targetCode: targetCode ?? null })
+}
+
+/** Recreate and reset all catalog defaults without touching custom sources. */
+export async function restoreDefaultSources(): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('restore_default_sources')
 }
 
 /** Read model routing and only a boolean indicating whether SQLite contains a model key. */

@@ -1,12 +1,14 @@
 /** Topic Desk Studio — main UI component. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, FolderOpen, HardDrive, Network, PanelRight, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Wrench } from 'lucide-react'
+import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Download, FolderOpen, HardDrive, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  backupStorage, browserRequest, collectXiaohongshuSession, getModelSettings, getNetworkSettings,
-  getStorageStatus, getUiPreferences, listTopics, openDataDirectory, optimizeStorage, refreshTopics,
-  restoreLatestBackup, saveModelSettings, saveNetworkSettings, saveUiPreferences, setPlatformEnabled,
+  backupStorage, browserRequest, collectXiaohongshuSession, deleteSource, exportSourceConfigurations,
+  getModelSettings, getNetworkSettings, getStorageStatus, getUiPreferences, importSourceConfigurations, listSourceConfigurations, listTopics,
+  openDataDirectory, optimizeStorage, refreshTopics, restoreLatestBackup, saveModelSettings,
+  restoreDefaultSources, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
   setTopicQueued, translateTopic,
 } from './api'
 import { BrowserPane } from './BrowserPane'
@@ -16,13 +18,19 @@ import {
   Locale, Theme, Messages, messages,
   detectLocale, detectTheme, applyTheme,
 } from './i18n'
-import type { CollectionStatusEvent, ModelSettings, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
+import type { CollectionStatusEvent, ModelSettings, SaveSourceConfiguration, SourceConfiguration, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
 
 const PAGE_SIZE = 20
 type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
 type SettingsTab = 'general' | 'network' | 'sources' | 'model' | 'storage'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
-interface NoticeState { readonly scope: 'workspace' | 'network' | 'model' | 'storage'; readonly text: string }
+interface NoticeState { readonly scope: 'workspace' | 'network' | 'sources' | 'model' | 'storage'; readonly text: string }
+
+const EMPTY_SOURCE: SaveSourceConfiguration = {
+  code: '', displayName: '', homeUrl: '', endpointUrl: '',
+  region: 'international', category: 'general', parserType: 'rss',
+  proxyMode: 'auto', enabled: true, parserConfig: {},
+}
 
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -210,6 +218,11 @@ export function App() {
   const [savingNetwork,   setSavingNetwork]      = useState(false)
   const [storageStatus,   setStorageStatus]      = useState<StorageStatus>()
   const [storageAction,   setStorageAction]      = useState<'backup' | 'restore' | 'optimize' | null>(null)
+  const [sourceConfigs,   setSourceConfigs]      = useState<SourceConfiguration[]>([])
+  const [sourceDraft,     setSourceDraft]        = useState<SaveSourceConfiguration>()
+  const [editingSourceCode, setEditingSourceCode] = useState<string>()
+  const [sourceBuiltIn,   setSourceBuiltIn]      = useState(false)
+  const [savingSource,    setSavingSource]       = useState(false)
 
   browserTabsRef.current = browserTabs
   activeBrowserTabIdRef.current = activeBrowserTabId
@@ -453,7 +466,21 @@ export function App() {
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getStorageStatus().then(setStorageStatus)
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+    void listSourceConfigurations().then(setSourceConfigs)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [view])
+
+  useEffect(() => {
+    if (notice === undefined) return
+    const timer = window.setTimeout(() => setNotice(undefined), 4000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    if (error === undefined) return
+    const timer = window.setTimeout(() => setError(undefined), 4000)
+    return () => window.clearTimeout(timer)
+  }, [error])
 
   // ── Actions ──────────────────────────────────────────────────────
   const collect = async (): Promise<void> => {
@@ -476,8 +503,94 @@ export function App() {
 
   const changePlatform = async (code: string, enabled: boolean): Promise<void> => {
     setError(undefined)
-    try { await setPlatformEnabled(code, enabled); await load() }
+    try {
+      await setPlatformEnabled(code, enabled)
+      setSourceConfigs((items) => items.map((item) => item.code === code ? { ...item, enabled } : item))
+      await load()
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  const editSource = (source?: SourceConfiguration): void => {
+    setError(undefined); setNotice(undefined)
+    setEditingSourceCode(source?.code)
+    setSourceBuiltIn(source?.builtIn === true)
+    setSourceDraft(source === undefined ? { ...EMPTY_SOURCE, parserConfig: {} } : {
+      code: source.code, displayName: source.displayName, homeUrl: source.homeUrl,
+      endpointUrl: source.endpointUrl, region: source.region, category: source.category,
+      parserType: source.parserType, proxyMode: source.proxyMode, enabled: source.enabled,
+      parserConfig: { ...source.parserConfig },
+    })
+  }
+
+  const updateSourceDraft = (update: Partial<SaveSourceConfiguration>): void => {
+    setSourceDraft((current) => current === undefined ? current : { ...current, ...update })
+  }
+
+  const updateParserConfig = (key: keyof SaveSourceConfiguration['parserConfig'], value: string): void => {
+    setSourceDraft((current) => current === undefined ? current : {
+      ...current,
+      parserConfig: { ...current.parserConfig, [key]: value },
+    })
+  }
+
+  const saveSource = async (): Promise<void> => {
+    if (!sourceDraft) return
+    setSavingSource(true); setError(undefined)
+    try {
+      setSourceConfigs(await saveSourceConfiguration(sourceDraft))
+      setSourceDraft(undefined)
+      setEditingSourceCode(undefined)
+      setNotice({ scope: 'sources', text: m.sourceSaved })
+      await load(true)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally { setSavingSource(false) }
+  }
+
+  const removeSource = async (source: SourceConfiguration): Promise<void> => {
+    if (!window.confirm(m.sourceDeleteConfirm(source.displayName))) return
+    setError(undefined)
+    try {
+      setSourceConfigs(await deleteSource(source.code))
+      if (editingSourceCode === source.code) {
+        setSourceDraft(undefined)
+        setEditingSourceCode(undefined)
+      }
+      await load(true)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  const exportSources = async (code?: string): Promise<void> => {
+    setError(undefined)
+    try {
+      if (await exportSourceConfigurations(locale, code)) setNotice({ scope: 'sources', text: m.sourceExported })
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  const importSources = async (targetCode?: string): Promise<void> => {
+    setError(undefined)
+    try {
+      const sources = await importSourceConfigurations(locale, targetCode)
+      if (sources === undefined) return
+      setSourceConfigs(sources)
+      setSourceDraft(undefined)
+      setEditingSourceCode(undefined)
+      setNotice({ scope: 'sources', text: m.sourceImported })
+      await load(true)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  const restoreSources = async (): Promise<void> => {
+    if (!window.confirm(m.sourceRestoreConfirm)) return
+    setError(undefined)
+    try {
+      setSourceConfigs(await restoreDefaultSources())
+      setSourceDraft(undefined)
+      setEditingSourceCode(undefined)
+      setNotice({ scope: 'sources', text: m.sourceDefaultsRestored })
+      await load(true)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
   const translate = async (topic: TopicView): Promise<void> => {
@@ -541,6 +654,37 @@ export function App() {
 
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / PAGE_SIZE))
 
+  /** Render the same editor either below the selected source row or above the list for a new source. */
+  const renderSourceEditor = (): ReactNode => sourceDraft === undefined ? null : (
+    <div className="source-editor">
+      <div className="source-editor-title"><strong>{editingSourceCode === undefined ? m.sourceAdd : m.sourceEdit}</strong><button type="button" aria-label={m.sourceCancel} onClick={() => { setSourceDraft(undefined); setEditingSourceCode(undefined) }}><X aria-hidden="true" /></button></div>
+      <div className="source-form-grid">
+        <label><span>{m.sourceCode}</span><input value={sourceDraft.code} disabled={editingSourceCode !== undefined} onChange={(e) => updateSourceDraft({ code: e.target.value.toLowerCase() })} placeholder="my-source" /></label>
+        <label><span>{m.sourceName}</span><input value={sourceDraft.displayName} onChange={(e) => updateSourceDraft({ displayName: e.target.value })} /></label>
+        <label className="wide"><span>{m.sourceHome}</span><input value={sourceDraft.homeUrl} onChange={(e) => updateSourceDraft({ homeUrl: e.target.value })} placeholder="https://example.com/" /></label>
+        <label className="wide"><span>{m.sourceEndpoint}</span><input value={sourceDraft.endpointUrl} onChange={(e) => updateSourceDraft({ endpointUrl: e.target.value })} placeholder="https://example.com/feed" /></label>
+        <label><span>{m.sourceParser}</span><select value={sourceDraft.parserType} disabled={sourceBuiltIn} onChange={(e) => updateSourceDraft({ parserType: e.target.value as SaveSourceConfiguration['parserType'], parserConfig: {} })}>{sourceBuiltIn ? <option value="builtin">{m.sourceBuiltIn}</option> : null}<option value="rss">RSS / Atom</option><option value="json">JSON</option><option value="html">HTML</option></select></label>
+        <label><span>{m.filterRegion}</span><select value={sourceDraft.region} onChange={(e) => updateSourceDraft({ region: e.target.value as SourceRegion })}><option value="domestic">{m.regionDomestic}</option><option value="international">{m.regionIntl}</option></select></label>
+        <label><span>{m.filterCategory}</span><select value={sourceDraft.category} onChange={(e) => updateSourceDraft({ category: e.target.value as TopicCategory })}><option value="general">{m.filterGeneral}</option><option value="technology">{m.filterTech}</option><option value="finance">{m.filterFinance}</option><option value="developer">{m.filterDev}</option></select></label>
+        <label><span>{m.sourceProxyMode}</span><select value={sourceDraft.proxyMode} onChange={(e) => updateSourceDraft({ proxyMode: e.target.value as SaveSourceConfiguration['proxyMode'] })}><option value="auto">{m.sourceAuto}</option><option value="direct">{m.sourceDirect}</option><option value="proxy">{m.sourceProxy}</option></select></label>
+      </div>
+      {sourceDraft.parserType === 'json' ? <div className="source-parser-grid">
+        {([['itemsPath', m.sourceItemsPath, 'data.items'], ['titlePath', m.sourceTitlePath, 'title'], ['urlPath', m.sourceUrlPath, 'url'], ['idPath', m.sourceIdPath, 'id'], ['publishedPath', m.sourcePublishedPath, 'publishedAt'], ['rankPath', m.sourceRankPath, 'rank'], ['heatPath', m.sourceHeatPath, 'score']] as const).map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={sourceDraft.parserConfig[key] ?? ''} placeholder={placeholder} onChange={(e) => updateParserConfig(key, e.target.value)} /></label>)}
+      </div> : null}
+      {sourceDraft.parserType === 'html' ? <div className="source-parser-grid">
+        {([['itemSelector', m.sourceItemSelector, 'article'], ['titleSelector', m.sourceTitleSelector, 'h2'], ['linkSelector', m.sourceLinkSelector, 'a']] as const).map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={sourceDraft.parserConfig[key] ?? ''} placeholder={placeholder} onChange={(e) => updateParserConfig(key, e.target.value)} /></label>)}
+      </div> : null}
+      <div className="source-editor-actions"><button type="button" onClick={() => { setSourceDraft(undefined); setEditingSourceCode(undefined) }}>{m.sourceCancel}</button><button className="primary-button" type="button" disabled={savingSource} onClick={() => void saveSource()}>{savingSource ? m.btnSaving : m.btnSave}</button></div>
+    </div>
+  )
+
+  const renderToastLayer = (): ReactNode => notice === undefined && error === undefined ? null : (
+    <div className="toast-stack" aria-live="polite">
+      {notice !== undefined ? <div key={notice.text} className="notice app-toast" role="status"><span>{notice.text}</span><button type="button" aria-label="关闭" onClick={() => setNotice(undefined)}><X aria-hidden="true" /></button></div> : null}
+      {error !== undefined ? <div key={error} className="error-banner app-toast" role="alert"><span>{error}</span><button type="button" aria-label="关闭" onClick={() => setError(undefined)}><X aria-hidden="true" /></button></div> : null}
+    </div>
+  )
+
   // ── Settings fullscreen ──────────────────────────────────────────
   if (view === 'settings') {
     const tabIcons: Record<SettingsTab, LucideIcon> = {
@@ -559,6 +703,7 @@ export function App() {
     }
     return (
       <div className="settings-fullscreen">
+        {renderToastLayer()}
         <header className="settings-fs-header">
           <button className="back-button" type="button" onClick={() => switchView(prevView)}>
             <ArrowLeft aria-hidden="true" />{m.settingsBack}
@@ -587,52 +732,52 @@ export function App() {
           {/* Right panel */}
           <div className="settings-panel">
             {settingsTab === 'general' && (
-              <>
-                {/* Appearance */}
-                <div className="pref-section">
-                  <p className="pref-section-title">{m.sectionAppearance}</p>
-                  <div className="pref-row">
-                    <span className="pref-label">{m.labelTheme}</span>
-                    <div className="seg-control">
-                      {(['light', 'system', 'dark'] as Theme[]).map((t) => (
-                        <button
-                          key={t}
-                          className={theme === t ? 'seg-btn active' : 'seg-btn'}
-                          onClick={() => setTheme(t)}
-                        >
-                          {t === 'light' ? m.themeLight : t === 'dark' ? m.themeDark : m.themeSystem}
-                        </button>
-                      ))}
+              <div className="settings-page">
+                <header className="settings-page-header"><div><h2>{m.tabGeneral}</h2><p>{m.settingsGeneralDesc}</p></div></header>
+                <div className="settings-surface general-settings-card">
+                  <section className="settings-group">
+                    <div className="settings-group-heading"><strong>{m.sectionAppearance}</strong><span>{m.labelTheme}</span></div>
+                    <div className="pref-row">
+                      <span className="pref-label">{m.labelTheme}</span>
+                      <div className="seg-control">
+                        {(['light', 'system', 'dark'] as Theme[]).map((t) => (
+                          <button
+                            key={t}
+                            className={theme === t ? 'seg-btn active' : 'seg-btn'}
+                            onClick={() => setTheme(t)}
+                          >
+                            {t === 'light' ? m.themeLight : t === 'dark' ? m.themeDark : m.themeSystem}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                </div>
-
-                {/* Language */}
-                <div className="pref-section">
-                  <p className="pref-section-title">{m.sectionLanguage}</p>
-                  <div className="pref-row">
-                    <span className="pref-label">{m.sectionLanguage}</span>
-                    <div className="seg-control">
-                      {(['zh', 'en'] as Locale[]).map((l) => (
-                        <button
-                          key={l}
-                          className={locale === l ? 'seg-btn active' : 'seg-btn'}
-                          onClick={() => setLocale(l)}
-                        >
-                          {l === 'zh' ? m.langZh : m.langEn}
-                        </button>
-                      ))}
+                  </section>
+                  <section className="settings-group">
+                    <div className="settings-group-heading"><strong>{m.sectionLanguage}</strong><span>{locale === 'zh' ? '界面显示语言' : 'Interface language'}</span></div>
+                    <div className="pref-row">
+                      <span className="pref-label">{m.sectionLanguage}</span>
+                      <div className="seg-control">
+                        {(['zh', 'en'] as Locale[]).map((l) => (
+                          <button
+                            key={l}
+                            className={locale === l ? 'seg-btn active' : 'seg-btn'}
+                            onClick={() => setLocale(l)}
+                          >
+                            {l === 'zh' ? m.langZh : m.langEn}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  </section>
                 </div>
-              </>
+              </div>
             )}
 
             {settingsTab === 'network' && (
               /* Native collection traffic never crosses the WebView network boundary. */
-              <div className="pref-section">
-                <p className="pref-section-title">{m.sectionNetwork}</p>
-                <div className="network-setting">
+              <div className="settings-page">
+                <header className="settings-page-header"><div><h2>{m.sectionNetwork}</h2><p>{m.settingsNetworkDesc}</p></div></header>
+                <div className="settings-surface network-setting">
                   <label>
                     <span>{m.labelProxy}</span>
                     <input
@@ -644,8 +789,6 @@ export function App() {
                     />
                   </label>
                   <p>{m.proxyHelp}</p>
-                  {notice?.scope === 'network' ? <div className="notice">{notice.text}</div> : null}
-                  {error !== undefined ? <div className="error-banner">{error}</div> : null}
                   <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
                     {savingNetwork ? m.btnSaving : m.btnSave}
                   </button>
@@ -654,94 +797,100 @@ export function App() {
             )}
 
             {settingsTab === 'sources' && (
-              <div className="source-list" aria-live="polite">
-                {page?.statuses.map((status) => (
-                  <div className="source-row" key={status.code}>
-                    <span className={`health-dot ${status.status === 'failed' ? 'failed' : status.status === 'succeeded' ? 'healthy' : ''}`} />
-                    <div className="source-row-info">
-                      <span className="source-row-name">{status.displayName}</span>
-                      <span className="source-row-meta" title={status.error ?? undefined}>
-                        {status.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status.error ?? (status.lastRunAt === null ? m.notCollected : m.topicCount(status.topicCount))}
-                      </span>
-                    </div>
-                    {status.code === 'xiaohongshu' ? (
-                      <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button>
-                    ) : null}
-                    <label className="switch">
-                      <input type="checkbox" checked={status.enabled} onChange={(e) => void changePlatform(status.code, e.target.checked)} />
-                      <span />
-                    </label>
+              <div className="settings-page source-settings" aria-live="polite">
+                <header className="settings-page-header source-settings-header">
+                  <div><h2>{m.tabSources}</h2><p>{m.settingsSourcesDesc}</p></div>
+                  <div className="source-batch-actions">
+                    <button type="button" onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
+                    <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
+                    <button type="button" onClick={() => void restoreSources()}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
+                    <button className="primary-button source-add-button" type="button" onClick={() => editSource()}><Plus aria-hidden="true" />{m.sourceAdd}</button>
                   </div>
-                ))}
+                </header>
+
+                {sourceDraft !== undefined && editingSourceCode === undefined ? renderSourceEditor() : null}
+                <div className="source-list">
+                  {sourceConfigs.map((sourceConfig) => {
+                    const status = page?.statuses.find((item) => item.code === sourceConfig.code)
+                    return <div className="source-list-item" key={sourceConfig.code}>
+                      <div className="source-row">
+                        <span className={`health-dot ${status?.status === 'failed' ? 'failed' : status?.status === 'succeeded' ? 'healthy' : ''}`} />
+                        <div className="source-row-info">
+                          <span className="source-row-name">{sourceConfig.displayName}<small className="source-kind">{sourceConfig.builtIn ? m.sourceBuiltIn : m.sourceCustom} · {sourceConfig.parserType.toUpperCase()}</small></span>
+                          <span className="source-row-meta" title={status?.error ?? undefined}>{sourceConfig.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status?.error ?? (status?.lastRunAt == null ? m.notCollected : m.topicCount(status.topicCount))}</span>
+                        </div>
+                        {sourceConfig.code === 'xiaohongshu' ? <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button> : null}
+                        <button className="source-icon-action" type="button" title={m.sourceImport} onClick={() => void importSources(sourceConfig.code)}><Download aria-hidden="true" /></button>
+                        <button className="source-icon-action" type="button" title={m.sourceExport} onClick={() => void exportSources(sourceConfig.code)}><Upload aria-hidden="true" /></button>
+                        <button className="source-icon-action" type="button" title={m.sourceEdit} onClick={() => editSource(sourceConfig)}><Pencil aria-hidden="true" /></button>
+                        <button className="source-icon-action danger" type="button" title={m.sourceDeleteConfirm(sourceConfig.displayName)} onClick={() => void removeSource(sourceConfig)}><Trash2 aria-hidden="true" /></button>
+                        <label className="switch"><input type="checkbox" checked={sourceConfig.enabled} onChange={(e) => void changePlatform(sourceConfig.code, e.target.checked)} /><span /></label>
+                      </div>
+                      {editingSourceCode === sourceConfig.code ? renderSourceEditor() : null}
+                    </div>
+                  })}
+                </div>
               </div>
             )}
 
             {settingsTab === 'storage' && (
-              <div className="storage-card">
-                <div>
-                  <p className="eyebrow">LOCAL-FIRST</p>
-                  <h2>{m.storageHeading}</h2>
-                  <p>{m.storageDesc}</p>
+              <div className="settings-page">
+                <header className="settings-page-header"><div><h2>{m.storageHeading}</h2><p>{m.storageDesc}</p></div></header>
+                <div className="settings-surface storage-card">
+                  {storageStatus !== undefined ? (
+                    <>
+                      <div className={`storage-health ${storageStatus.integrityOk ? 'healthy' : 'failed'}`}>
+                        <span />{storageStatus.integrityOk ? m.storageHealthy : m.storageDamaged}
+                      </div>
+                      <div className="storage-metrics">
+                        <div><strong>{storageStatus.topicCount.toLocaleString()}</strong><span>{m.storageTopics}</span></div>
+                        <div><strong>{storageStatus.observationCount.toLocaleString()}</strong><span>{m.storageTrends}</span></div>
+                        <div><strong>{storageStatus.collectionRunCount.toLocaleString()}</strong><span>{m.storageRuns}</span></div>
+                        <div><strong>{storageStatus.browserRecordCount.toLocaleString()}</strong><span>{m.storageBrowser}</span></div>
+                      </div>
+                      <dl className="storage-details">
+                        <div><dt>{m.storageTopicDb}</dt><dd>{formatBytes(storageStatus.topicDatabaseBytes)}</dd></div>
+                        <div><dt>{m.storageBrowserDb}</dt><dd>{formatBytes(storageStatus.browserDatabaseBytes)}</dd></div>
+                        <div><dt>{m.storageLatestBackup}</dt><dd>{formatBackupName(storageStatus.latestBackup, m.storageNoBackup)}</dd></div>
+                      </dl>
+                    </>
+                  ) : null}
+                  <div className="settings-card-actions storage-actions">
+                    <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
+                    <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
+                    <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
+                    <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => void runStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
+                  </div>
+                  {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}
                 </div>
-                {storageStatus !== undefined ? (
-                  <>
-                    <div className={`storage-health ${storageStatus.integrityOk ? 'healthy' : 'failed'}`}>
-                      <span />{storageStatus.integrityOk ? m.storageHealthy : m.storageDamaged}
-                    </div>
-                    <div className="storage-metrics">
-                      <div><strong>{storageStatus.topicCount.toLocaleString()}</strong><span>{m.storageTopics}</span></div>
-                      <div><strong>{storageStatus.observationCount.toLocaleString()}</strong><span>{m.storageTrends}</span></div>
-                      <div><strong>{storageStatus.collectionRunCount.toLocaleString()}</strong><span>{m.storageRuns}</span></div>
-                      <div><strong>{storageStatus.browserRecordCount.toLocaleString()}</strong><span>{m.storageBrowser}</span></div>
-                    </div>
-                    <dl className="storage-details">
-                      <div><dt>{m.storageTopicDb}</dt><dd>{formatBytes(storageStatus.topicDatabaseBytes)}</dd></div>
-                      <div><dt>{m.storageBrowserDb}</dt><dd>{formatBytes(storageStatus.browserDatabaseBytes)}</dd></div>
-                      <div><dt>{m.storageLatestBackup}</dt><dd>{formatBackupName(storageStatus.latestBackup, m.storageNoBackup)}</dd></div>
-                    </dl>
-                  </>
-                ) : null}
-                {notice?.scope === 'storage' ? <div className="notice">{notice.text}</div> : null}
-                {error !== undefined ? <div className="error-banner">{error}</div> : null}
-                <div className="storage-actions">
-                  <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
-                  <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
-                  <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
-                  <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => void runStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
-                </div>
-                {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}
               </div>
             )}
 
             {settingsTab === 'model' && (
-              <div className="settings-card">
-                <div>
-                  <p className="eyebrow">OPENAI-COMPATIBLE</p>
-                  <h2>{m.modelHeading}</h2>
-                  <p>{m.modelDesc}</p>
+              <div className="settings-page">
+                <header className="settings-page-header"><div><h2>{m.modelHeading}</h2><p>{m.modelDesc}</p></div></header>
+                <div className="settings-surface settings-card">
+                  <label>
+                    <span>{m.labelEndpoint}</span>
+                    <input value={modelEndpoint} onChange={(e) => setModelEndpoint(e.target.value)} placeholder="https://api.deepseek.com" />
+                  </label>
+                  <label>
+                    <span>{m.labelModel}</span>
+                    <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="deepseek-chat" />
+                  </label>
+                  <label>
+                    <span>{m.labelApiKey}</span>
+                    <input
+                      type="password" value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder={modelSettings?.hasApiKey === true ? m.apiKeySavedPlaceholder : m.apiKeyPlaceholder}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <div className="settings-card-actions"><button className="primary-button settings-save" type="button" disabled={savingSettings} onClick={() => void saveSettings()}>
+                    {savingSettings ? m.btnSaving : m.btnSave}
+                  </button></div>
                 </div>
-                <label>
-                  <span>{m.labelEndpoint}</span>
-                  <input value={modelEndpoint} onChange={(e) => setModelEndpoint(e.target.value)} placeholder="https://api.deepseek.com" />
-                </label>
-                <label>
-                  <span>{m.labelModel}</span>
-                  <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="deepseek-chat" />
-                </label>
-                <label>
-                  <span>{m.labelApiKey}</span>
-                  <input
-                    type="password" value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={modelSettings?.hasApiKey === true ? m.apiKeySavedPlaceholder : m.apiKeyPlaceholder}
-                    autoComplete="off"
-                  />
-                </label>
-                {notice?.scope === 'model' ? <div className="notice">{notice.text}</div> : null}
-                {error  !== undefined ? <div className="error-banner">{error}</div> : null}
-                <button className="primary-button settings-save" type="button" disabled={savingSettings} onClick={() => void saveSettings()}>
-                  {savingSettings ? m.btnSaving : m.btnSave}
-                </button>
               </div>
             )}
           </div>
@@ -755,6 +904,7 @@ export function App() {
 
   return (
     <div className="app-shell">
+      {renderToastLayer()}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">TD</span>
@@ -853,9 +1003,6 @@ export function App() {
             <span>{m.resultsErrors(page?.statuses.filter((s) => s.error !== null).length ?? 0)}</span>
           </div>
         </div>
-
-        {notice?.scope === 'workspace' ? <div className="notice">{notice.text}</div> : null}
-        {error  !== undefined ? <div className="error-banner">{error}</div> : null}
 
         <section className="results" aria-live="polite">
           {loading ? (

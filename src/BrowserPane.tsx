@@ -139,6 +139,18 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
     }
   }, [fail, onUpdateTab, refreshLibrary])
 
+  useEffect(() => {
+    if (notice === null) return
+    const timer = window.setTimeout(() => setNotice(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    if (error === null) return
+    const timer = window.setTimeout(() => setError(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [error])
+
   // Keep native geometry in sync without destroying navigation history on topic changes.
   useEffect(() => {
     const element = viewport.current
@@ -413,8 +425,10 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
     {slowLoading ? <div className="browser-slow-notice" role="status"><span>{t('目标网站响应较慢，请检查网络后重试。', 'The website is responding slowly. Check your network and try again.')}</span><button type="button" onClick={() => void browserRequest('reload', activeTabId).catch(fail)}>{t('重试', 'Retry')}</button></div> : null}
     {findOpen ? <form className="browser-find" onSubmit={(event) => { event.preventDefault(); void find(false).catch(fail) }}><Icon name="search" /><input autoFocus placeholder={t('在页面中查找', 'Find in page')} aria-label={t('在页面中查找', 'Find in page')} value={findText} onChange={(e) => { setFindText(e.target.value); setFindResult(null) }} /><button type="button" className={sensitive ? 'active' : ''} title={t('区分大小写', 'Match case')} onClick={() => setSensitive(!sensitive)}>Aa</button><span>{findResult === false ? t('未找到', 'No match') : ''}</span><button type="button" aria-label={t('上一项', 'Previous match')} title={t('上一项', 'Previous match')} onClick={() => void find(true).catch(fail)}><ChevronUp aria-hidden="true" /></button><button aria-label={t('下一项', 'Next match')} title={t('下一项', 'Next match')}><ChevronDown aria-hidden="true" /></button><button type="button" aria-label={t('关闭查找', 'Close find')} title={t('关闭查找', 'Close find')} onClick={() => setFindOpen(false)}><X aria-hidden="true" /></button></form> : null}
     {device ? <div className="browser-device"><select aria-label={t('设备尺寸', 'Device size')} onChange={(event) => { const [width, height] = event.target.value.split('x').map(Number); if (width && height) { setDeviceWidth(width); setDeviceHeight(height) } }} defaultValue="390x844"><option value="390x844">{t('手机', 'Phone')} · 390 × 844</option><option value="768x1024">{t('平板', 'Tablet')} · 768 × 1024</option><option value="1280x800">{t('桌面', 'Desktop')} · 1280 × 800</option></select><input type="number" aria-label={t('视口宽度', 'Viewport width')} min={240} max={2560} value={deviceWidth} onChange={(e) => setDeviceWidth(Math.max(240, Math.min(2560, Number(e.target.value))))} /><span>×</span><input type="number" aria-label={t('视口高度', 'Viewport height')} min={200} max={2560} value={deviceHeight} onChange={(e) => setDeviceHeight(Math.max(200, Math.min(2560, Number(e.target.value))))} /><button aria-label={t('旋转', 'Rotate')} title={t('旋转', 'Rotate')} onClick={() => { setDeviceWidth(deviceHeight); setDeviceHeight(deviceWidth) }}><RotateCw aria-hidden="true" /></button><small>{t('视口预览', 'Viewport preview')}</small></div> : null}
-    {error ? <div className="reader-error browser-notice" role="alert">{error}<button aria-label={t('关闭', 'Close')} onClick={() => setError(null)}><X aria-hidden="true" /></button></div> : null}
-    {notice ? <div className="browser-notice" role="status">{notice}<button aria-label={t('关闭', 'Close')} onClick={() => setNotice(null)}><X aria-hidden="true" /></button></div> : null}
+    {error || notice ? <div className="toast-stack" aria-live="polite">
+      {error ? <div key={error} className="error-banner app-toast" role="alert"><span>{error}</span><button aria-label={t('关闭', 'Close')} onClick={() => setError(null)}><X aria-hidden="true" /></button></div> : null}
+      {notice ? <div key={notice} className="notice app-toast" role="status"><span>{notice}</span><button aria-label={t('关闭', 'Close')} onClick={() => setNotice(null)}><X aria-hidden="true" /></button></div> : null}
+    </div> : null}
     <div className="browser-stage">
       <div className="reader-viewport" ref={viewport} style={device ? { width: deviceWidth, maxWidth: '100%', height: deviceHeight, maxHeight: '100%', flex: 'none' } : undefined} />
       {hasPage && status.loading ? <div className="browser-page-loading" aria-label={t('正在打开网页', 'Opening webpage')}><span /><p>{t('正在打开网页…', 'Opening webpage…')}</p></div> : null}

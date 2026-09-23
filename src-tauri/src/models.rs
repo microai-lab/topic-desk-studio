@@ -20,6 +20,25 @@ pub enum TopicCategory {
     Developer,
 }
 
+/// Safe parser families exposed to source configuration; arbitrary code is never accepted.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceParserType {
+    Builtin,
+    Rss,
+    Json,
+    Html,
+}
+
+/// Per-source routing overrides are resolved only by the native collector.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceProxyMode {
+    Auto,
+    Direct,
+    Proxy,
+}
+
 /// Supported deterministic ordering choices for topic pages.
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -83,6 +102,65 @@ pub struct PlatformStatusView {
     pub topic_count: i64,
 }
 
+/// Declarative, persisted source definition returned to the settings interface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceConfiguration {
+    pub code: String,
+    pub display_name: String,
+    pub home_url: String,
+    pub endpoint_url: String,
+    pub region: SourceRegion,
+    pub category: TopicCategory,
+    pub parser_type: SourceParserType,
+    pub proxy_mode: SourceProxyMode,
+    pub enabled: bool,
+    pub built_in: bool,
+    pub parser_config: CustomParserConfig,
+}
+
+/// Validated source update crossing the WebView boundary.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSourceConfiguration {
+    pub code: String,
+    pub display_name: String,
+    pub home_url: String,
+    pub endpoint_url: String,
+    pub region: SourceRegion,
+    pub category: TopicCategory,
+    pub parser_type: SourceParserType,
+    pub proxy_mode: SourceProxyMode,
+    pub enabled: bool,
+    #[serde(default)]
+    pub parser_config: CustomParserConfig,
+}
+
+/// Versioned portable document used for both single-source and batch transfers.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceConfigurationBundle {
+    pub format: String,
+    pub version: u32,
+    pub sources: Vec<SaveSourceConfiguration>,
+}
+
+/// Field paths and CSS selectors supported by the generic JSON and HTML parsers.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomParserConfig {
+    pub items_path: Option<String>,
+    pub id_path: Option<String>,
+    pub title_path: Option<String>,
+    pub url_path: Option<String>,
+    pub published_path: Option<String>,
+    pub rank_path: Option<String>,
+    pub heat_path: Option<String>,
+    pub item_selector: Option<String>,
+    pub title_selector: Option<String>,
+    pub link_selector: Option<String>,
+}
+
 /// Paginated topic response returned to the React application.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,6 +221,9 @@ pub struct PlatformSource {
     pub id: i64,
     pub code: String,
     pub endpoint_url: String,
+    pub parser_type: SourceParserType,
+    pub parser_config: CustomParserConfig,
+    pub proxy_mode: SourceProxyMode,
 }
 
 /// Counters accumulated across independently isolated platform collections.

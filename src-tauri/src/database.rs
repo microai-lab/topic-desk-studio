@@ -6,11 +6,11 @@ use std::path::Path;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, MAIN_DB};
 use zeroize::Zeroizing;
 
-use crate::catalog::PLATFORM_CATALOG;
+use crate::catalog::{default_category, default_proxy_mode, default_region, PLATFORM_CATALOG};
 use crate::credential_cipher::{CredentialCipher, EncryptedCredential, ALGORITHM, MASTER_KEY_FILE};
 use crate::error::{AppError, AppResult};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:7897";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 
@@ -74,15 +74,15 @@ fn backup_before_migration(connection: &Connection, path: &Path, version: i64) -
     Ok(())
 }
 
-/// Seed catalog metadata without overwriting future user choices such as enabled state or feed URL.
+/// Seed missing catalog rows once; deleted defaults stay deleted until an explicit restore.
 fn ensure_platforms(connection: &Connection) -> AppResult<()> {
     let mut statement = connection.prepare(
         "INSERT INTO platform (
-           code, display_name, home_url, feed_url, enabled, create_time, update_time
-         ) VALUES (?, ?, ?, ?, 1, datetime('now', 'localtime'), datetime('now', 'localtime'))
-         ON CONFLICT(code) DO UPDATE SET display_name = excluded.display_name,
-           home_url = excluded.home_url, deleted = 0,
-           update_time = datetime('now', 'localtime')",
+           code, display_name, home_url, feed_url, region, category, parser_type,
+           proxy_mode, built_in, enabled, create_time, update_time
+         ) VALUES (?, ?, ?, ?, ?, ?, 'builtin', ?, 1, 1,
+                   datetime('now', 'localtime'), datetime('now', 'localtime'))
+         ON CONFLICT(code) DO NOTHING",
     )?;
     for platform in PLATFORM_CATALOG {
         statement.execute((
@@ -90,6 +90,9 @@ fn ensure_platforms(connection: &Connection) -> AppResult<()> {
             platform.display_name,
             platform.home_url,
             platform.endpoint_url,
+            default_region(platform.code),
+            default_category(platform.code),
+            default_proxy_mode(platform.code),
         ))?;
     }
     Ok(())
@@ -125,56 +128,96 @@ fn initialize(connection: &mut Connection, master_key_path: &Path) -> AppResult<
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         2 => {
             migrate_from_v2(connection)?;
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         3 => {
             migrate_from_v3(connection)?;
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         4 => {
             migrate_from_v4(connection, master_key_path)?;
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         5 => {
             migrate_from_v5(connection)?;
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         6 => {
             migrate_from_v6(connection)?;
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         7 => {
             migrate_from_v7(connection)?;
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
         8 => {
             migrate_from_v8(connection)?;
-            migrate_from_v9(connection)
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
         }
-        9 => migrate_from_v9(connection),
+        9 => {
+            migrate_from_v9(connection)?;
+            migrate_from_v10(connection)
+        }
+        10 => migrate_from_v10(connection),
         unsupported => Err(AppError::Initialization(format!(
             "不支持的 Topic Desk 数据库版本：{unsupported}"
         ))),
     }
+}
+
+/// Version 11 adds declarative custom-source metadata without changing built-in parsers.
+fn migrate_from_v10(connection: &mut Connection) -> AppResult<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE platform ADD COLUMN region TEXT NOT NULL DEFAULT 'international';
+         ALTER TABLE platform ADD COLUMN category TEXT NOT NULL DEFAULT 'general';
+         ALTER TABLE platform ADD COLUMN parser_type TEXT NOT NULL DEFAULT 'builtin';
+         ALTER TABLE platform ADD COLUMN parser_config TEXT;
+         ALTER TABLE platform ADD COLUMN proxy_mode TEXT NOT NULL DEFAULT 'auto';
+         ALTER TABLE platform ADD COLUMN built_in INTEGER NOT NULL DEFAULT 1;",
+    )?;
+    for platform in PLATFORM_CATALOG {
+        transaction.execute(
+            "UPDATE platform SET region = ?, category = ?, proxy_mode = ?, built_in = 1,
+               parser_type = 'builtin' WHERE code = ?",
+            params![
+                default_region(platform.code),
+                default_category(platform.code),
+                default_proxy_mode(platform.code),
+                platform.code
+            ],
+        )?;
+    }
+    transaction.pragma_update(None, "user_version", 11_i64)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 /// Version 10 persists the newest three non-empty addition batches across launches.
@@ -662,5 +705,28 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version should be readable");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// Startup catalog seeding must not undo an explicit deletion of a default source.
+    #[test]
+    fn catalog_seeding_preserves_deleted_defaults() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        initialize(&mut connection, Path::new("unused-test-key"))
+            .expect("schema should initialize");
+        ensure_platforms(&connection).expect("catalog should seed");
+        connection
+            .execute("UPDATE platform SET deleted = 1 WHERE code = 'qbitai'", [])
+            .expect("default source should delete");
+
+        ensure_platforms(&connection).expect("catalog should seed idempotently");
+
+        let deleted: i64 = connection
+            .query_row(
+                "SELECT deleted FROM platform WHERE code = 'qbitai'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("default source should remain stored");
+        assert_eq!(deleted, 1);
     }
 }

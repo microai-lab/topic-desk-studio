@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Only the main webview receives the permissions required by the Topic Desk UI.","local":true,"webviews":["main"],"permissions":["core:default","opener:allow-open-url","opener:allow-default-urls"]}}
+{"default":{"identifier":"default","description":"Only the main webview receives the permissions required by the Topic Desk UI.","local":true,"webviews":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-save","opener:allow-open-url","opener:allow-default-urls"]}}

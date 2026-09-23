@@ -10,13 +10,16 @@ use encoding_rs::GBK;
 use regex::Regex;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
+use scraper::{Html, Selector};
 use serde_json::Value;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use url::Url;
 
 use crate::database::open_database;
 use crate::error::{AppError, AppResult};
-use crate::models::{CollectedTopic, CollectionStats, ParsedFeed, PlatformSource};
+use crate::models::{
+    CollectedTopic, CollectionStats, ParsedFeed, PlatformSource, SourceParserType, SourceProxyMode,
+};
 use crate::repository::TopicRepository;
 
 const ITEMS_PER_PLATFORM: usize = 50;
@@ -85,7 +88,7 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
             scope.spawn(move || loop {
                 let job = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
                 let Some((platform, run_id)) = job else { break };
-                let client = if source_requires_proxy(&platform.code) {
+                let client = if source_requires_proxy(&platform) {
                     proxy_client.as_ref().unwrap_or(&direct_client)
                 } else {
                     &direct_client
@@ -124,36 +127,24 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
 
 /// Route only sources proven unreliable on direct mainland connections through
 /// the explicit proxy; all others keep their original geographic response.
-fn source_requires_proxy(code: &str) -> bool {
-    matches!(
-        code,
-        "binance-square-zh"
-            | "binance-square-global"
-            | "mastodon-zh"
-            | "mastodon-global"
-            | "coingecko"
-            | "github"
-            | "google-trends-zh"
-            | "google-trends-global"
-            | "hugging-face"
-            | "bluesky"
-            | "polymarket"
-            | "bbc-chinese"
-            | "dw-chinese"
-            | "rfi-chinese"
-            | "bloomberg"
-    )
+fn source_requires_proxy(platform: &PlatformSource) -> bool {
+    match platform.proxy_mode {
+        SourceProxyMode::Proxy => true,
+        SourceProxyMode::Direct => false,
+        SourceProxyMode::Auto => crate::catalog::default_proxy_mode(&platform.code) == "proxy",
+    }
 }
 
 /// Fetch one source with known fallbacks and reject an apparently successful empty parse.
 fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
-    // The canonical project-ranking endpoint supersedes the legacy daily-papers
-    // URL already stored by older installations without overwriting user settings.
-    let mut endpoints = if platform.code == "hugging-face" {
-        vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
-    } else {
-        vec![platform.endpoint_url.as_str()]
-    };
+    // Upgrade only the endpoint shipped by old installations. Once the user
+    // edits this field, their configured endpoint must remain authoritative.
+    let mut endpoints =
+        if platform.code == "hugging-face" && platform.endpoint_url.contains("/api/daily_papers") {
+            vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
+        } else {
+            vec![platform.endpoint_url.as_str()]
+        };
     match platform.code.as_str() {
         "36kr" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=36kr"),
         "xueqiu" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=xueqiu"),
@@ -203,6 +194,24 @@ fn fetch_endpoint(
         .unwrap_or_default()
         .to_ascii_lowercase();
     let bytes = response.bytes().map_err(collection_error)?;
+
+    match platform.parser_type {
+        SourceParserType::Rss => return parse_feed(&platform.code, &bytes),
+        SourceParserType::Json => {
+            let payload: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                AppError::Collection(format!("{} JSON 无效：{error}", platform.code))
+            })?;
+            return parse_custom_json(platform, &payload, final_url.as_str());
+        }
+        SourceParserType::Html => {
+            return parse_custom_html(
+                platform,
+                decode_text(&bytes, &content_type),
+                final_url.as_str(),
+            )
+        }
+        SourceParserType::Builtin => {}
+    }
 
     if matches!(platform.code.as_str(), "arxiv") {
         return parse_arxiv(
@@ -401,6 +410,144 @@ fn parse_json(code: &str, payload: &Value, endpoint: &str) -> AppResult<ParsedFe
         invalid_count: fetched_count.saturating_sub(topics.len() as u32),
         fetched_count,
         topics,
+    })
+}
+
+/// Parse a configured JSON array using bounded dot paths or JSON pointers.
+fn parse_custom_json(
+    platform: &PlatformSource,
+    payload: &Value,
+    endpoint: &str,
+) -> AppResult<ParsedFeed> {
+    let config = &platform.parser_config;
+    let title_path = required_config(&config.title_path, "标题字段")?;
+    let url_path = required_config(&config.url_path, "链接字段")?;
+    let items = value_at_path(payload, config.items_path.as_deref().unwrap_or(""))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::Collection(format!("{} 列表路径未指向 JSON 数组", platform.code))
+        })?;
+    let fetched_count = items.len().min(ITEMS_PER_PLATFORM) as u32;
+    let mut topics = Vec::new();
+    for (index, item) in items.iter().take(ITEMS_PER_PLATFORM).enumerate() {
+        let configured_rank = config
+            .rank_path
+            .as_deref()
+            .and_then(|path| number(value_at_path(item, path)))
+            .and_then(|value| (value >= 1.0).then_some(value as usize));
+        if let Some(topic) = make_topic(
+            &platform.code,
+            configured_rank.unwrap_or(index + 1),
+            config
+                .id_path
+                .as_deref()
+                .and_then(|path| text(value_at_path(item, path))),
+            text(value_at_path(item, title_path)),
+            text(value_at_path(item, url_path)),
+            config
+                .published_path
+                .as_deref()
+                .and_then(|path| text(value_at_path(item, path))),
+            config
+                .heat_path
+                .as_deref()
+                .and_then(|path| number(value_at_path(item, path))),
+            endpoint,
+        ) {
+            topics.push(topic);
+        }
+    }
+    Ok(ParsedFeed {
+        invalid_count: fetched_count.saturating_sub(topics.len() as u32),
+        fetched_count,
+        topics,
+    })
+}
+
+/// Parse configured HTML using CSS selectors without evaluating page scripts.
+fn parse_custom_html(
+    platform: &PlatformSource,
+    html: String,
+    endpoint: &str,
+) -> AppResult<ParsedFeed> {
+    let config = &platform.parser_config;
+    let item_selector = parse_selector(config.item_selector.as_deref(), "条目选择器")?;
+    let title_selector = parse_selector(config.title_selector.as_deref(), "标题选择器")?;
+    let link_selector = parse_selector(
+        config
+            .link_selector
+            .as_deref()
+            .or(config.title_selector.as_deref()),
+        "链接选择器",
+    )?;
+    let document = Html::parse_document(&html);
+    let items = document
+        .select(&item_selector)
+        .take(ITEMS_PER_PLATFORM)
+        .collect::<Vec<_>>();
+    let fetched_count = items.len() as u32;
+    let mut topics = Vec::new();
+    for (index, item) in items.into_iter().enumerate() {
+        let title = item
+            .select(&title_selector)
+            .next()
+            .map(|node| node.text().collect::<Vec<_>>().join(" "));
+        let link = item
+            .select(&link_selector)
+            .next()
+            .and_then(|node| node.value().attr("href"))
+            .map(str::to_owned);
+        if let Some(topic) = make_topic(
+            &platform.code,
+            index + 1,
+            link.clone(),
+            title,
+            link,
+            None,
+            None,
+            endpoint,
+        ) {
+            topics.push(topic);
+        }
+    }
+    Ok(ParsedFeed {
+        invalid_count: fetched_count.saturating_sub(topics.len() as u32),
+        fetched_count,
+        topics,
+    })
+}
+
+fn required_config<'a>(value: &'a Option<String>, label: &str) -> AppResult<&'a str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Collection(format!("缺少{label}")))
+}
+
+fn parse_selector(value: Option<&str>, label: &str) -> AppResult<Selector> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Collection(format!("缺少{label}")))?;
+    Selector::parse(value)
+        .map_err(|_| AppError::Collection(format!("{label}不是有效的 CSS 选择器")))
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Some(value);
+    }
+    if path.starts_with('/') {
+        return value.pointer(path);
+    }
+    path.split('.').try_fold(value, |current, segment| {
+        if let Ok(index) = segment.parse::<usize>() {
+            current.get(index)
+        } else {
+            current.get(segment)
+        }
     })
 }
 
@@ -992,6 +1139,7 @@ fn collection_error(error: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::CustomParserConfig;
 
     /// The shipped fixtures protect RSS and Atom compatibility independently of network access.
     #[test]
@@ -1056,19 +1204,72 @@ mod tests {
 
     #[test]
     fn proxies_only_sources_that_need_non_direct_routes() {
-        for code in [
-            "coingecko",
+        let platform = |code: &str, proxy_mode| PlatformSource {
+            id: 1,
+            code: code.into(),
+            endpoint_url: "https://example.com".into(),
+            parser_type: SourceParserType::Builtin,
+            parser_config: CustomParserConfig::default(),
+            proxy_mode,
+        };
+        assert!(source_requires_proxy(&platform(
             "github",
-            "google-trends-zh",
-            "hugging-face",
-            "bbc-chinese",
-            "binance-square-global",
-        ] {
-            assert!(source_requires_proxy(code), "{code} should use the proxy");
-        }
-        for code in ["36kr", "weibo", "baidu", "zhihu", "arxiv"] {
-            assert!(!source_requires_proxy(code), "{code} should stay direct");
-        }
+            SourceProxyMode::Auto
+        )));
+        assert!(!source_requires_proxy(&platform(
+            "36kr",
+            SourceProxyMode::Auto
+        )));
+        assert!(source_requires_proxy(&platform(
+            "custom",
+            SourceProxyMode::Proxy
+        )));
+        assert!(!source_requires_proxy(&platform(
+            "github",
+            SourceProxyMode::Direct
+        )));
+    }
+
+    #[test]
+    fn parses_declarative_json_and_html_sources() {
+        let json_platform = PlatformSource {
+            id: 1,
+            code: "custom-json".into(),
+            endpoint_url: "https://example.com/api".into(),
+            parser_type: SourceParserType::Json,
+            parser_config: CustomParserConfig {
+                items_path: Some("data.items".into()),
+                id_path: Some("id".into()),
+                title_path: Some("title".into()),
+                url_path: Some("url".into()),
+                ..CustomParserConfig::default()
+            },
+            proxy_mode: SourceProxyMode::Direct,
+        };
+        let payload =
+            serde_json::json!({"data":{"items":[{"id":"1","title":"Hello","url":"/hello"}]}});
+        let json = parse_custom_json(&json_platform, &payload, "https://example.com/api").unwrap();
+        assert_eq!(json.topics[0].url, "https://example.com/hello");
+
+        let html_platform = PlatformSource {
+            code: "custom-html".into(),
+            parser_type: SourceParserType::Html,
+            parser_config: CustomParserConfig {
+                item_selector: Some("article".into()),
+                title_selector: Some("h2".into()),
+                link_selector: Some("a".into()),
+                ..CustomParserConfig::default()
+            },
+            ..json_platform
+        };
+        let html = parse_custom_html(
+            &html_platform,
+            "<article><h2>World</h2><a href='/world'>Read</a></article>".into(),
+            "https://example.com/",
+        )
+        .unwrap();
+        assert_eq!(html.topics[0].title, "World");
+        assert_eq!(html.topics[0].url, "https://example.com/world");
     }
 
     /// Legacy Chinese pages commonly advertise GB2312 only in a meta tag.

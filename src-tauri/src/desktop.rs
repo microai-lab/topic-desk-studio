@@ -17,10 +17,31 @@ use tauri::{
 /// that call `window.open` directly.
 const ARTICLE_INITIALIZATION_SCRIPT: &str = r#"
 (() => {
-  // WKWebView asks macOS Keychain for an application-wide master key when a
-  // CryptoKey is serialized into IndexedDB, even with a non-persistent data
-  // store. Reader pages may use WebCrypto in memory, but must not persist its
-  // key objects or make the host application touch the system credential store.
+  // WKWebView asks macOS Keychain for an application-wide master key when an
+  // untrusted page serializes a CryptoKey into IndexedDB. A value-level guard
+  // is insufficient because WebKit may begin native serialization before the
+  // wrapper can inspect every host object. Reader views therefore reject all
+  // IndexedDB database access. Cookies remain available for site login during
+  // the ephemeral view lifetime, while no persistent WebCrypto key can form.
+  const factory = globalThis.IDBFactory?.prototype;
+  for (const method of ['open', 'deleteDatabase']) {
+    const descriptor = factory && Object.getOwnPropertyDescriptor(factory, method);
+    if (!descriptor || typeof descriptor.value !== 'function') continue;
+    Object.defineProperty(factory, method, {
+      ...descriptor,
+      configurable: false,
+      writable: false,
+      value() {
+        throw new DOMException(
+          'IndexedDB is disabled in the temporary reader',
+          'SecurityError',
+        );
+      },
+    });
+  }
+
+  // Keep a second guard on already-open handles in case WebKit supplied one to
+  // a page object before this frame-level initialization script ran.
   const CryptoKeyType = globalThis.CryptoKey;
   if (typeof CryptoKeyType === 'function') {
     const containsCryptoKey = (root) => {
@@ -347,8 +368,8 @@ pub fn browser_request(
                     // Ephemeral article views must never create WebCrypto or password material
                     // in the operating-system credential store.
                     .incognito(true)
-                    // Run the storage guard in every frame because third-party
-                    // embeds can otherwise serialize a key through their own IDB.
+                    // Run the storage isolation in every frame because third-party
+                    // embeds can otherwise open their own persistent database.
                     .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
                     .on_navigation(is_article_url)
                     .on_document_title_changed(move |view, title| {
@@ -675,6 +696,21 @@ mod tests {
         assert_eq!(tab_label("tab-42").unwrap(), "article-tab-42");
         for value in ["", "../main", "tab 1", "tab/1", &"a".repeat(65)] {
             assert!(tab_label(value).is_err(), "label must reject {value:?}");
+        }
+    }
+
+    #[test]
+    fn article_bootstrap_blocks_persistent_webcrypto_storage() {
+        for required_guard in [
+            "IDBFactory?.prototype",
+            "['open', 'deleteDatabase']",
+            "IDBObjectStore?.prototype",
+            "CryptoKey persistence is disabled",
+        ] {
+            assert!(
+                ARTICLE_INITIALIZATION_SCRIPT.contains(required_guard),
+                "reader bootstrap must retain {required_guard}"
+            );
         }
     }
 }

@@ -16,11 +16,12 @@ mod storage;
 mod translator;
 
 use commands::{
-    backup_storage, browser_request, collect_xiaohongshu_session, get_model_settings,
-    get_network_settings, get_storage_status, get_ui_preferences, list_topics, open_data_directory,
-    optimize_storage, refresh_topics, restore_latest_backup, save_model_settings,
-    save_network_settings, save_ui_preferences, set_platform_enabled, set_topic_queued,
-    translate_topic, AppState,
+    backup_storage, browser_request, collect_xiaohongshu_session, delete_source,
+    export_source_configurations, get_model_settings, get_network_settings, get_storage_status,
+    get_ui_preferences, import_source_configurations, list_source_configurations, list_topics,
+    open_data_directory, optimize_storage, refresh_topics, restore_default_sources,
+    restore_latest_backup, save_model_settings, save_network_settings, save_source_configuration,
+    save_ui_preferences, set_platform_enabled, set_topic_queued, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app
@@ -120,6 +122,12 @@ pub fn run() {
             optimize_storage,
             open_data_directory,
             set_platform_enabled,
+            list_source_configurations,
+            save_source_configuration,
+            delete_source,
+            export_source_configurations,
+            import_source_configurations,
+            restore_default_sources,
             set_topic_queued,
             translate_topic,
             browser_request,

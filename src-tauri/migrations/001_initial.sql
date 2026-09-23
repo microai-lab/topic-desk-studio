@@ -1,4 +1,4 @@
--- Topic Desk Studio SQLite schema version 10, compatible with dsh-topic-desk data exports.
+-- Topic Desk Studio SQLite schema version 11, compatible with dsh-topic-desk data exports.
 CREATE TABLE platform (
   id INTEGER PRIMARY KEY,
   deleted INTEGER NOT NULL DEFAULT 0,
@@ -8,6 +8,12 @@ CREATE TABLE platform (
   display_name TEXT NOT NULL,
   home_url TEXT NOT NULL,
   feed_url TEXT NOT NULL,
+  region TEXT NOT NULL DEFAULT 'international',
+  category TEXT NOT NULL DEFAULT 'general',
+  parser_type TEXT NOT NULL DEFAULT 'builtin',
+  parser_config TEXT,
+  proxy_mode TEXT NOT NULL DEFAULT 'auto',
+  built_in INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
   last_success_run_id INTEGER,
   UNIQUE (code)
@@ -161,4 +167,4 @@ CREATE INDEX idx_collection_run_platform_status_end ON collection_run (platform_
 CREATE INDEX idx_creation_queue_active_time ON creation_queue (deleted, create_time DESC, id DESC);
 CREATE INDEX idx_recent_addition_topic_id ON recent_addition_topic (topic_id, batch_id DESC);
 
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;

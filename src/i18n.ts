@@ -61,6 +61,9 @@ export interface Messages {
   tabSources: string
   tabModel: string
   tabStorage: string
+  settingsGeneralDesc: string
+  settingsSourcesDesc: string
+  settingsNetworkDesc: string
   // General tab — appearance
   sectionAppearance: string
   labelTheme: string
@@ -101,6 +104,41 @@ export interface Messages {
   topicCount: (n: number) => string
   xhsLoginCollect: string
   xhsCollectPage: string
+  sourceAdd: string
+  sourceEdit: string
+  sourceCustom: string
+  sourceBuiltIn: string
+  sourceCode: string
+  sourceName: string
+  sourceHome: string
+  sourceEndpoint: string
+  sourceParser: string
+  sourceProxyMode: string
+  sourceAuto: string
+  sourceDirect: string
+  sourceProxy: string
+  sourceItemsPath: string
+  sourceTitlePath: string
+  sourceUrlPath: string
+  sourceIdPath: string
+  sourcePublishedPath: string
+  sourceRankPath: string
+  sourceHeatPath: string
+  sourceItemSelector: string
+  sourceTitleSelector: string
+  sourceLinkSelector: string
+  sourceCancel: string
+  sourceSaved: string
+  sourceImport: string
+  sourceExport: string
+  sourceImportAll: string
+  sourceExportAll: string
+  sourceRestoreDefaults: string
+  sourceImported: string
+  sourceExported: string
+  sourceDefaultsRestored: string
+  sourceDeleteConfirm: (name: string) => string
+  sourceRestoreConfirm: string
   // Model tab
   modelHeading: string
   modelDesc: string
@@ -164,6 +202,9 @@ const zh: Messages = {
   tabSources: '数据来源',
   tabModel: '翻译模型',
   tabStorage: '本地数据',
+  settingsGeneralDesc: '调整界面外观与语言偏好，设置会自动保存在本机。',
+  settingsSourcesDesc: '管理采集来源、解析方式和单独的网络路由。',
+  settingsNetworkDesc: '设置采集服务使用的本地代理地址和连接策略。',
   sectionAppearance: '外观',
   labelTheme: '主题',
   themeLight: '浅色',
@@ -201,6 +242,41 @@ const zh: Messages = {
   topicCount: (n) => `${n} 条话题`,
   xhsLoginCollect: '登录采集',
   xhsCollectPage: '采集当前页',
+  sourceAdd: '添加数据源',
+  sourceEdit: '编辑数据源',
+  sourceCustom: '自定义',
+  sourceBuiltIn: '内置',
+  sourceCode: '来源代码',
+  sourceName: '显示名称',
+  sourceHome: '网站首页',
+  sourceEndpoint: '采集地址',
+  sourceParser: '解析方式',
+  sourceProxyMode: '网络方式',
+  sourceAuto: '自动判断',
+  sourceDirect: '直连',
+  sourceProxy: '使用代理',
+  sourceItemsPath: '列表路径',
+  sourceTitlePath: '标题字段',
+  sourceUrlPath: '链接字段',
+  sourceIdPath: '稳定 ID 字段（可选）',
+  sourcePublishedPath: '发布时间字段（可选）',
+  sourceRankPath: '排名字段（可选）',
+  sourceHeatPath: '热度字段（可选）',
+  sourceItemSelector: '条目 CSS 选择器',
+  sourceTitleSelector: '标题 CSS 选择器',
+  sourceLinkSelector: '链接 CSS 选择器（默认同标题）',
+  sourceCancel: '取消',
+  sourceSaved: '数据源配置已保存。',
+  sourceImport: '导入',
+  sourceExport: '导出',
+  sourceImportAll: '批量导入',
+  sourceExportAll: '批量导出',
+  sourceRestoreDefaults: '恢复默认来源',
+  sourceImported: '数据源导入完成。',
+  sourceExported: '数据源文件已导出。',
+  sourceDefaultsRestored: '默认数据源已恢复。',
+  sourceDeleteConfirm: (name) => `删除数据源“${name}”？历史话题仍会保留。`,
+  sourceRestoreConfirm: '恢复全部默认数据源？已修改的默认来源会重置，但自定义来源和历史话题不会删除。',
   modelHeading: '英文标题翻译',
   modelDesc: '接口地址与模型名保存在本地 SQLite；API Key 加密后入库，仅在调用模型时于内存解密。',
   labelEndpoint: '接口地址',
@@ -263,6 +339,9 @@ const en: Messages = {
   tabSources: 'Sources',
   tabModel: 'Translation',
   tabStorage: 'Local data',
+  settingsGeneralDesc: 'Adjust appearance and language preferences. Changes are saved locally.',
+  settingsSourcesDesc: 'Manage collection sources, parsers, and per-source network routing.',
+  settingsNetworkDesc: 'Configure the local proxy address and connection policy used for collection.',
   sectionAppearance: 'Appearance',
   labelTheme: 'Theme',
   themeLight: 'Light',
@@ -300,6 +379,41 @@ const en: Messages = {
   topicCount: (n) => `${n} topic${n !== 1 ? 's' : ''}`,
   xhsLoginCollect: 'Login & collect',
   xhsCollectPage: 'Collect page',
+  sourceAdd: 'Add source',
+  sourceEdit: 'Edit source',
+  sourceCustom: 'Custom',
+  sourceBuiltIn: 'Built-in',
+  sourceCode: 'Source code',
+  sourceName: 'Display name',
+  sourceHome: 'Home page',
+  sourceEndpoint: 'Collection URL',
+  sourceParser: 'Parser',
+  sourceProxyMode: 'Network route',
+  sourceAuto: 'Automatic',
+  sourceDirect: 'Direct',
+  sourceProxy: 'Use proxy',
+  sourceItemsPath: 'Items path',
+  sourceTitlePath: 'Title field',
+  sourceUrlPath: 'URL field',
+  sourceIdPath: 'Stable ID field (optional)',
+  sourcePublishedPath: 'Published field (optional)',
+  sourceRankPath: 'Rank field (optional)',
+  sourceHeatPath: 'Heat field (optional)',
+  sourceItemSelector: 'Item CSS selector',
+  sourceTitleSelector: 'Title CSS selector',
+  sourceLinkSelector: 'Link CSS selector (defaults to title)',
+  sourceCancel: 'Cancel',
+  sourceSaved: 'Source configuration saved.',
+  sourceImport: 'Import',
+  sourceExport: 'Export',
+  sourceImportAll: 'Import all',
+  sourceExportAll: 'Export all',
+  sourceRestoreDefaults: 'Restore defaults',
+  sourceImported: 'Source import completed.',
+  sourceExported: 'Source file exported.',
+  sourceDefaultsRestored: 'Default sources restored.',
+  sourceDeleteConfirm: (name) => `Delete source “${name}”? Historical topics will remain.`,
+  sourceRestoreConfirm: 'Restore all default sources? Modified defaults will be reset, while custom sources and historical topics stay intact.',
   modelHeading: 'Title Translation',
   modelDesc: 'Endpoint and model name are stored in SQLite. The API key is encrypted at rest and decrypted in memory only for model calls.',
   labelEndpoint: 'Endpoint',

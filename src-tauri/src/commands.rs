@@ -1,5 +1,7 @@
 //! Narrow, validated Tauri command surface exposed to the sandboxed WebView.
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,12 +11,14 @@ use serde::Deserialize;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::catalog::PLATFORM_CATALOG;
 use crate::collector;
 use crate::credential_cipher::{CredentialCipher, MASTER_KEY_FILE};
 use crate::error::AppError;
 use crate::models::{
     CollectionStatusEvent, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings,
-    SaveNetworkSettings, SaveUiPreferences, StorageOperationResult, StorageStatus, TopicPage,
+    SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration,
+    SourceConfigurationBundle, SourceParserType, StorageOperationResult, StorageStatus, TopicPage,
     TopicQuery, TranslationResult, UiPreferences,
 };
 use crate::repository::TopicRepository;
@@ -100,6 +104,242 @@ pub fn set_platform_enabled(
     with_repository(&state, |repository| {
         repository.set_platform_enabled(&code, enabled)
     })
+}
+
+/// Return all editable built-in and custom source definitions.
+#[tauri::command]
+pub fn list_source_configurations(
+    state: State<'_, AppState>,
+) -> Result<Vec<SourceConfiguration>, String> {
+    with_repository(&state, |repository| repository.source_configurations())
+}
+
+/// Validate and persist a declarative source without allowing executable configuration.
+#[tauri::command]
+pub fn save_source_configuration(
+    state: State<'_, AppState>,
+    source: SaveSourceConfiguration,
+) -> Result<Vec<SourceConfiguration>, String> {
+    validate_source_configuration(&source)?;
+    validate_source_parser_identity(&source)?;
+    with_repository(&state, |repository| {
+        let existing = repository
+            .source_configurations()?
+            .into_iter()
+            .find(|item| item.code == source.code);
+        if source.parser_type == SourceParserType::Builtin
+            && !existing.is_some_and(|item| item.built_in)
+            && !is_default_source(&source.code)
+        {
+            return Err(AppError::InvalidInput(
+                "自定义来源不能使用内置解析器".into(),
+            ));
+        }
+        repository.save_source_configuration(&source)?;
+        repository.source_configurations()
+    })
+}
+
+/// Delete any source while retaining its historical topics.
+#[tauri::command]
+pub fn delete_source(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<Vec<SourceConfiguration>, String> {
+    with_repository(&state, |repository| {
+        repository.delete_source(code.trim())?;
+        repository.source_configurations()
+    })
+}
+
+/// Export one source or the complete active list as a versioned JSON document.
+#[tauri::command]
+pub fn export_source_configurations(
+    state: State<'_, AppState>,
+    path: String,
+    code: Option<String>,
+) -> Result<(), String> {
+    let sources = with_repository(&state, |repository| repository.source_configurations())?;
+    let selected = sources
+        .into_iter()
+        .filter(|source| code.as_ref().is_none_or(|code| source.code == *code))
+        .map(source_for_export)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err("没有可导出的数据源".into());
+    }
+    let document = SourceConfigurationBundle {
+        format: "topic-desk-sources".into(),
+        version: 1,
+        sources: selected,
+    };
+    let json = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("无法生成数据源文件：{error}"))?;
+    fs::write(PathBuf::from(path), json).map_err(|error| format!("无法写入数据源文件：{error}"))
+}
+
+/// Import a portable JSON document after validating every row, then commit it atomically.
+#[tauri::command]
+pub fn import_source_configurations(
+    state: State<'_, AppState>,
+    path: String,
+    target_code: Option<String>,
+) -> Result<Vec<SourceConfiguration>, String> {
+    let path = PathBuf::from(path);
+    let metadata = fs::metadata(&path).map_err(|error| format!("无法读取数据源文件：{error}"))?;
+    if metadata.len() > 1024 * 1024 {
+        return Err("数据源文件不能超过 1 MB".into());
+    }
+    let json = fs::read_to_string(path).map_err(|error| format!("无法读取数据源文件：{error}"))?;
+    let bundle: SourceConfigurationBundle =
+        serde_json::from_str(&json).map_err(|error| format!("数据源 JSON 格式无效：{error}"))?;
+    if bundle.format != "topic-desk-sources" || bundle.version != 1 {
+        return Err("不是受支持的 Topic Desk 数据源文件".into());
+    }
+    if bundle.sources.is_empty() || bundle.sources.len() > 500 {
+        return Err("数据源文件必须包含 1–500 个来源".into());
+    }
+    if let Some(target_code) = target_code.as_deref() {
+        if bundle.sources.len() != 1 || bundle.sources[0].code != target_code {
+            return Err(format!("请选择仅包含来源“{target_code}”的单来源文件"));
+        }
+    }
+    let mut codes = HashSet::new();
+    for source in &bundle.sources {
+        if !codes.insert(source.code.as_str()) {
+            return Err(format!("数据源文件包含重复代码：{}", source.code));
+        }
+        validate_source_configuration(source)?;
+        validate_source_parser_identity(source)?;
+    }
+    with_repository(&state, |repository| {
+        repository.import_source_configurations(&bundle.sources)?;
+        repository.source_configurations()
+    })
+}
+
+/// Recreate and reset every catalog source while leaving custom sources untouched.
+#[tauri::command]
+pub fn restore_default_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<SourceConfiguration>, String> {
+    with_repository(&state, |repository| {
+        repository.restore_default_sources()?;
+        repository.source_configurations()
+    })
+}
+
+fn source_for_export(source: SourceConfiguration) -> SaveSourceConfiguration {
+    SaveSourceConfiguration {
+        code: source.code,
+        display_name: source.display_name,
+        home_url: source.home_url,
+        endpoint_url: source.endpoint_url,
+        region: source.region,
+        category: source.category,
+        parser_type: source.parser_type,
+        proxy_mode: source.proxy_mode,
+        enabled: source.enabled,
+        parser_config: source.parser_config,
+    }
+}
+
+fn is_default_source(code: &str) -> bool {
+    PLATFORM_CATALOG.iter().any(|source| source.code == code)
+}
+
+fn validate_source_parser_identity(source: &SaveSourceConfiguration) -> Result<(), String> {
+    match (is_default_source(&source.code), source.parser_type) {
+        (true, SourceParserType::Builtin)
+        | (false, SourceParserType::Rss | SourceParserType::Json | SourceParserType::Html) => {
+            Ok(())
+        }
+        (true, _) => Err(format!("默认来源 {} 必须使用内置解析器", source.code)),
+        (false, SourceParserType::Builtin) => Err(format!("{} 不能使用内置解析器", source.code)),
+    }
+}
+
+fn validate_source_configuration(source: &SaveSourceConfiguration) -> Result<(), String> {
+    let code = source.code.trim();
+    if code.len() < 2
+        || code.len() > 48
+        || !code
+            .bytes()
+            .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'-')
+    {
+        return Err("来源代码需为 2–48 位小写字母、数字或连字符".into());
+    }
+    if source.display_name.trim().is_empty() || source.display_name.chars().count() > 80 {
+        return Err("来源名称不能为空且最多 80 个字符".into());
+    }
+    for (label, raw) in [
+        ("首页", &source.home_url),
+        ("采集地址", &source.endpoint_url),
+    ] {
+        if raw.len() > 4096 {
+            return Err(format!("{label}不能超过 4096 个字符"));
+        }
+        let url = url::Url::parse(raw.trim()).map_err(|error| format!("{label}无效：{error}"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(format!("{label}必须是不含凭据的 HTTP(S) URL"));
+        }
+    }
+    for value in [
+        &source.parser_config.items_path,
+        &source.parser_config.id_path,
+        &source.parser_config.title_path,
+        &source.parser_config.url_path,
+        &source.parser_config.published_path,
+        &source.parser_config.rank_path,
+        &source.parser_config.heat_path,
+        &source.parser_config.item_selector,
+        &source.parser_config.title_selector,
+        &source.parser_config.link_selector,
+    ] {
+        if value.as_ref().is_some_and(|value| value.len() > 256) {
+            return Err("字段路径和 CSS 选择器不能超过 256 个字符".into());
+        }
+    }
+    match source.parser_type {
+        SourceParserType::Json => {
+            required_source_field(&source.parser_config.title_path, "JSON 标题字段")?;
+            required_source_field(&source.parser_config.url_path, "JSON 链接字段")?;
+        }
+        SourceParserType::Html => {
+            for (value, label) in [
+                (&source.parser_config.item_selector, "HTML 条目选择器"),
+                (&source.parser_config.title_selector, "HTML 标题选择器"),
+            ] {
+                let selector = required_source_field(value, label)?;
+                scraper::Selector::parse(selector)
+                    .map_err(|_| format!("{label}不是有效的 CSS 选择器"))?;
+            }
+            if let Some(selector) = source
+                .parser_config
+                .link_selector
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                scraper::Selector::parse(selector)
+                    .map_err(|_| "HTML 链接选择器不是有效的 CSS 选择器".to_string())?;
+            }
+        }
+        SourceParserType::Builtin | SourceParserType::Rss => {}
+    }
+    Ok(())
+}
+
+fn required_source_field<'a>(value: &'a Option<String>, label: &str) -> Result<&'a str, String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{label}不能为空"))
 }
 
 /// Return model routing and SQLite credential presence without exposing the stored secret.

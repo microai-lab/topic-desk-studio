@@ -38,6 +38,40 @@ export interface PlatformStatusView {
   readonly topicCount: number
 }
 
+export type SourceParserType = 'builtin' | 'rss' | 'json' | 'html'
+export type SourceProxyMode = 'auto' | 'direct' | 'proxy'
+
+/** Declarative parser fields; values are interpreted only by Rust. */
+export interface CustomParserConfig {
+  readonly itemsPath?: string
+  readonly idPath?: string
+  readonly titlePath?: string
+  readonly urlPath?: string
+  readonly publishedPath?: string
+  readonly rankPath?: string
+  readonly heatPath?: string
+  readonly itemSelector?: string
+  readonly titleSelector?: string
+  readonly linkSelector?: string
+}
+
+/** Editable source definition stored in SQLite. */
+export interface SourceConfiguration {
+  readonly code: string
+  readonly displayName: string
+  readonly homeUrl: string
+  readonly endpointUrl: string
+  readonly region: SourceRegion
+  readonly category: TopicCategory
+  readonly parserType: SourceParserType
+  readonly proxyMode: SourceProxyMode
+  readonly enabled: boolean
+  readonly builtIn: boolean
+  readonly parserConfig: CustomParserConfig
+}
+
+export type SaveSourceConfiguration = Omit<SourceConfiguration, 'builtIn'>
+
 /** SQLite 查询参数；所有可选字段均在 Rust 边界再次校验。 */
 export interface TopicQuery {
   readonly source?: string

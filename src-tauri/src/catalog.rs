@@ -9,6 +9,95 @@ pub struct PlatformDefinition {
     pub endpoint_url: &'static str,
 }
 
+/// Stable built-in region used only when a catalog source is first inserted.
+pub fn default_region(code: &str) -> &'static str {
+    if matches!(
+        code,
+        "qbitai"
+            | "ithome"
+            | "36kr"
+            | "huxiu"
+            | "c114"
+            | "wallstreetcn"
+            | "odaily"
+            | "xueqiu"
+            | "toutiao"
+            | "thepaper"
+            | "zhihu"
+            | "jin10"
+            | "cls"
+            | "xiaohongshu"
+            | "weibo"
+            | "douyin"
+            | "bilibili"
+            | "baidu"
+            | "sspai"
+            | "solidot"
+    ) {
+        "domestic"
+    } else {
+        "international"
+    }
+}
+
+/// Stable built-in category used only when a catalog source is first inserted.
+pub fn default_category(code: &str) -> &'static str {
+    match code {
+        "qbitai"
+        | "ithome"
+        | "c114"
+        | "hugging-face"
+        | "arxiv"
+        | "techcrunch"
+        | "the-verge"
+        | "ars-technica"
+        | "mit-technology-review"
+        | "infoq"
+        | "sspai"
+        | "solidot" => "technology",
+        "wallstreetcn"
+        | "odaily"
+        | "xueqiu"
+        | "binance-square-zh"
+        | "binance-square-global"
+        | "coingecko"
+        | "polymarket"
+        | "federal-reserve"
+        | "sec"
+        | "bloomberg"
+        | "jin10"
+        | "cls" => "finance",
+        "hacker-news" | "github" | "stack-overflow" | "dev-community" | "lobsters" => "developer",
+        _ => "general",
+    }
+}
+
+/// Automatic routing defaults for catalog sources; custom sources choose explicitly.
+pub fn default_proxy_mode(code: &str) -> &'static str {
+    if matches!(
+        code,
+        "binance-square-zh"
+            | "binance-square-global"
+            | "mastodon-zh"
+            | "mastodon-global"
+            | "coingecko"
+            | "github"
+            | "google-trends-zh"
+            | "google-trends-global"
+            | "hugging-face"
+            | "bluesky"
+            | "polymarket"
+            | "bbc-chinese"
+            | "dw-chinese"
+            | "rfi-chinese"
+            | "bloomberg"
+    ) {
+        "proxy"
+    } else {
+        "direct"
+    }
+}
+
 /// Product catalog. Feed URLs remain local database fields so a later settings UI can override them.
 pub const PLATFORM_CATALOG: &[PlatformDefinition] = &[
     PlatformDefinition { code: "qbitai", display_name: "量子位", home_url: "https://www.qbitai.com/", endpoint_url: "https://www.qbitai.com/feed" },

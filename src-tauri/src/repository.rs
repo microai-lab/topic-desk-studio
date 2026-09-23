@@ -4,77 +4,92 @@ use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
+use crate::catalog::{default_category, default_proxy_mode, default_region, PLATFORM_CATALOG};
 use crate::credential_cipher::{EncryptedCredential, ALGORITHM};
 use crate::error::{AppError, AppResult};
 use crate::identity::identify_topic;
 use crate::models::{
     CollectionStats, ModelSettings, NetworkSettings, ParsedFeed, PlatformSource,
-    PlatformStatusView, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
+    PlatformStatusView, SaveSourceConfiguration, SourceConfiguration, SourceParserType,
+    SourceProxyMode, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
     UiLocale, UiPreferences, UiTheme,
 };
 
-/// Resolve a source region without trusting values stored outside the platform catalog.
-fn region_for(code: &str) -> SourceRegion {
-    const DOMESTIC: &[&str] = &[
-        "qbitai",
-        "ithome",
-        "36kr",
-        "huxiu",
-        "c114",
-        "wallstreetcn",
-        "odaily",
-        "xueqiu",
-        "toutiao",
-        "thepaper",
-        "zhihu",
-        "jin10",
-        "cls",
-        "xiaohongshu",
-        "weibo",
-        "douyin",
-        "bilibili",
-        "baidu",
-        "sspai",
-        "solidot",
-    ];
-    if DOMESTIC.contains(&code) {
-        SourceRegion::Domestic
-    } else {
-        SourceRegion::International
+fn parse_region(value: &str) -> AppResult<SourceRegion> {
+    match value {
+        "domestic" => Ok(SourceRegion::Domestic),
+        "international" => Ok(SourceRegion::International),
+        _ => Err(AppError::Initialization(format!(
+            "无效的数据源地区：{value}"
+        ))),
     }
 }
 
-/// Resolve the stable product category assigned to a platform code.
-fn category_for(code: &str) -> TopicCategory {
-    match code {
-        "qbitai"
-        | "ithome"
-        | "c114"
-        | "hugging-face"
-        | "arxiv"
-        | "techcrunch"
-        | "the-verge"
-        | "ars-technica"
-        | "mit-technology-review"
-        | "infoq"
-        | "sspai"
-        | "solidot" => TopicCategory::Technology,
-        "wallstreetcn"
-        | "odaily"
-        | "xueqiu"
-        | "binance-square-zh"
-        | "binance-square-global"
-        | "coingecko"
-        | "polymarket"
-        | "federal-reserve"
-        | "sec"
-        | "bloomberg"
-        | "jin10"
-        | "cls" => TopicCategory::Finance,
-        "hacker-news" | "github" | "stack-overflow" | "dev-community" | "lobsters" => {
-            TopicCategory::Developer
-        }
-        _ => TopicCategory::General,
+fn parse_category(value: &str) -> AppResult<TopicCategory> {
+    match value {
+        "general" => Ok(TopicCategory::General),
+        "technology" => Ok(TopicCategory::Technology),
+        "finance" => Ok(TopicCategory::Finance),
+        "developer" => Ok(TopicCategory::Developer),
+        _ => Err(AppError::Initialization(format!(
+            "无效的数据源分类：{value}"
+        ))),
+    }
+}
+
+fn parse_parser_type(value: &str) -> AppResult<SourceParserType> {
+    match value {
+        "builtin" => Ok(SourceParserType::Builtin),
+        "rss" => Ok(SourceParserType::Rss),
+        "json" => Ok(SourceParserType::Json),
+        "html" => Ok(SourceParserType::Html),
+        _ => Err(AppError::Initialization(format!(
+            "无效的数据源解析器：{value}"
+        ))),
+    }
+}
+
+fn parse_proxy_mode(value: &str) -> AppResult<SourceProxyMode> {
+    match value {
+        "auto" => Ok(SourceProxyMode::Auto),
+        "direct" => Ok(SourceProxyMode::Direct),
+        "proxy" => Ok(SourceProxyMode::Proxy),
+        _ => Err(AppError::Initialization(format!(
+            "无效的数据源代理模式：{value}"
+        ))),
+    }
+}
+
+fn parser_type_value(value: SourceParserType) -> &'static str {
+    match value {
+        SourceParserType::Builtin => "builtin",
+        SourceParserType::Rss => "rss",
+        SourceParserType::Json => "json",
+        SourceParserType::Html => "html",
+    }
+}
+
+fn proxy_mode_value(value: SourceProxyMode) -> &'static str {
+    match value {
+        SourceProxyMode::Auto => "auto",
+        SourceProxyMode::Direct => "direct",
+        SourceProxyMode::Proxy => "proxy",
+    }
+}
+
+fn region_value(value: SourceRegion) -> &'static str {
+    match value {
+        SourceRegion::Domestic => "domestic",
+        SourceRegion::International => "international",
+    }
+}
+
+fn category_value(value: TopicCategory) -> &'static str {
+    match value {
+        TopicCategory::General => "general",
+        TopicCategory::Technology => "technology",
+        TopicCategory::Finance => "finance",
+        TopicCategory::Developer => "developer",
     }
 }
 
@@ -189,7 +204,7 @@ impl<'connection> TopicRepository<'connection> {
             "SELECT t.id, p.code, p.display_name, t.title, t.canonical_url, t.published_time,
                     t.rank, t.heat, t.create_time, t.update_time,
                     ROW_NUMBER() OVER (ORDER BY t.rank ASC, p.code ASC, t.id ASC),
-                    CASE WHEN cq.id IS NULL THEN 0 ELSE 1 END, cq.create_time
+                    CASE WHEN cq.id IS NULL THEN 0 ELSE 1 END, cq.create_time, p.category
              FROM topic t
              JOIN platform p ON p.id = t.platform_id
              LEFT JOIN creation_queue cq ON cq.topic_id = t.id AND cq.deleted = 0
@@ -324,6 +339,129 @@ impl<'connection> TopicRepository<'connection> {
         if changed == 0 {
             return Err(AppError::InvalidInput(format!("未知来源：{code}")));
         }
+        Ok(())
+    }
+
+    /// Return editable source definitions without exposing collection history internals.
+    pub fn source_configurations(&self) -> AppResult<Vec<SourceConfiguration>> {
+        let mut statement = self.connection.prepare(
+            "SELECT code, display_name, home_url, feed_url, region, category,
+                    parser_type, proxy_mode, enabled, built_in, parser_config
+             FROM platform WHERE deleted = 0 ORDER BY built_in DESC, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, i64>(8)? != 0,
+                row.get::<_, i64>(9)? != 0,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })?;
+        let mut sources = Vec::new();
+        for row in rows {
+            let (
+                code,
+                display_name,
+                home_url,
+                endpoint_url,
+                region,
+                category,
+                parser_type,
+                proxy_mode,
+                enabled,
+                built_in,
+                parser_config,
+            ) = row?;
+            sources.push(SourceConfiguration {
+                code,
+                display_name,
+                home_url,
+                endpoint_url,
+                region: parse_region(&region)?,
+                category: parse_category(&category)?,
+                parser_type: parse_parser_type(&parser_type)?,
+                proxy_mode: parse_proxy_mode(&proxy_mode)?,
+                enabled,
+                built_in,
+                parser_config: parser_config
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|error| {
+                        AppError::Initialization(format!("数据源解析配置损坏：{error}"))
+                    })?
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(sources)
+    }
+
+    /// Upsert one validated definition while preserving whether an existing source is built in.
+    pub fn save_source_configuration(&self, source: &SaveSourceConfiguration) -> AppResult<()> {
+        upsert_source_configuration(self.connection, source)
+    }
+
+    /// Import a validated bundle atomically so a malformed row cannot leave partial state.
+    pub fn import_source_configurations(
+        &self,
+        sources: &[SaveSourceConfiguration],
+    ) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for source in sources {
+            upsert_source_configuration(&transaction, source)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Soft-delete any source while retaining its topics and collection history.
+    pub fn delete_source(&self, code: &str) -> AppResult<()> {
+        let changed = self.connection.execute(
+            "UPDATE platform SET deleted = 1, enabled = 0,
+               update_time = datetime('now', 'localtime')
+             WHERE code = ? AND deleted = 0",
+            [code],
+        )?;
+        if changed == 0 {
+            return Err(AppError::InvalidInput("数据源不存在或已删除".into()));
+        }
+        Ok(())
+    }
+
+    /// Restore the immutable catalog defaults without removing user-created sources or history.
+    pub fn restore_default_sources(&self) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for platform in PLATFORM_CATALOG {
+            transaction.execute(
+                "INSERT INTO platform (
+                   code, display_name, home_url, feed_url, region, category, parser_type,
+                   parser_config, proxy_mode, built_in, enabled, create_time, update_time
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'builtin', NULL, ?, 1, 1,
+                           datetime('now', 'localtime'), datetime('now', 'localtime'))
+                 ON CONFLICT(code) DO UPDATE SET
+                   display_name = excluded.display_name, home_url = excluded.home_url,
+                   feed_url = excluded.feed_url, region = excluded.region,
+                   category = excluded.category, parser_type = 'builtin', parser_config = NULL,
+                   proxy_mode = excluded.proxy_mode, built_in = 1, enabled = 1, deleted = 0,
+                   update_time = datetime('now', 'localtime')",
+                params![
+                    platform.code,
+                    platform.display_name,
+                    platform.home_url,
+                    platform.endpoint_url,
+                    default_region(platform.code),
+                    default_category(platform.code),
+                    default_proxy_mode(platform.code),
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -506,18 +644,37 @@ impl<'connection> TopicRepository<'connection> {
     /// Load enabled sources before collection so no database lock is held during HTTP requests.
     pub fn enabled_platforms(&self) -> AppResult<Vec<PlatformSource>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, code, feed_url FROM platform
+            "SELECT id, code, feed_url, parser_type, parser_config, proxy_mode FROM platform
              WHERE deleted = 0 AND enabled != 0 ORDER BY id",
         )?;
-        let platforms = statement
-            .query_map([], |row| {
-                Ok(PlatformSource {
-                    id: row.get(0)?,
-                    code: row.get(1)?,
-                    endpoint_url: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut platforms = Vec::new();
+        for row in rows {
+            let (id, code, endpoint_url, parser_type, parser_config, proxy_mode) = row?;
+            platforms.push(PlatformSource {
+                id,
+                code,
+                endpoint_url,
+                parser_type: parse_parser_type(&parser_type)?,
+                parser_config: parser_config
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|error| {
+                        AppError::Initialization(format!("数据源解析配置损坏：{error}"))
+                    })?
+                    .unwrap_or_default(),
+                proxy_mode: parse_proxy_mode(&proxy_mode)?,
+            });
+        }
         Ok(platforms)
     }
 
@@ -731,7 +888,7 @@ impl<'connection> TopicRepository<'connection> {
         Ok(())
     }
 
-    /// Read all platform codes and apply in-memory catalog metadata filters.
+    /// Read persisted source metadata so custom sources participate in filters.
     fn filtered_platform_codes(
         &self,
         region: Option<SourceRegion>,
@@ -739,23 +896,38 @@ impl<'connection> TopicRepository<'connection> {
     ) -> AppResult<Vec<String>> {
         let mut statement = self
             .connection
-            .prepare("SELECT code FROM platform WHERE deleted = 0")?;
-        let codes = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(codes
-            .into_iter()
-            .filter(|code| region.is_none_or(|value| region_for(code) == value))
-            .filter(|code| category.is_none_or(|value| category_for(code) == value))
-            .collect())
+            .prepare("SELECT code, region, category FROM platform WHERE deleted = 0")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut codes = Vec::new();
+        for row in rows {
+            let (code, stored_region, stored_category) = row?;
+            if region.is_none_or(|value| parse_region(&stored_region).ok() == Some(value))
+                && category.is_none_or(|value| parse_category(&stored_category).ok() == Some(value))
+            {
+                codes.push(code);
+            }
+        }
+        Ok(codes)
     }
 
     /// Map the stable columns returned by the topic page query.
     fn map_topic(&self, row: &Row<'_>) -> rusqlite::Result<TopicView> {
         let platform_code: String = row.get(1)?;
+        let stored_category: String = row.get(13)?;
         Ok(TopicView {
             id: row.get(0)?,
-            category: category_for(&platform_code),
+            category: match stored_category.as_str() {
+                "technology" => TopicCategory::Technology,
+                "finance" => TopicCategory::Finance,
+                "developer" => TopicCategory::Developer,
+                _ => TopicCategory::General,
+            },
             platform_code,
             platform_name: row.get(2)?,
             title: row.get(3)?,
@@ -845,25 +1017,48 @@ impl<'connection> TopicRepository<'connection> {
                (SELECT cr.end_time FROM collection_run cr WHERE cr.platform_id = p.id AND cr.deleted = 0 ORDER BY cr.id DESC LIMIT 1),
                (SELECT cr.error_message FROM collection_run cr WHERE cr.platform_id = p.id AND cr.deleted = 0 ORDER BY cr.id DESC LIMIT 1),
                (SELECT COUNT(*) FROM topic t WHERE t.platform_id = p.id AND t.deleted = 0
-                 AND p.last_success_run_id = t.last_collection_run_id)
+                 AND p.last_success_run_id = t.last_collection_run_id),
+               p.region, p.category
              FROM platform p WHERE p.deleted = 0 ORDER BY p.id",
         )?;
-        let mut statuses = statement
-            .query_map([], |row| {
-                let code: String = row.get(0)?;
-                Ok(PlatformStatusView {
-                    region: region_for(&code),
-                    category: category_for(&code),
-                    code,
-                    display_name: row.get(1)?,
-                    enabled: row.get::<_, i64>(2)? != 0,
-                    status: row.get(3)?,
-                    last_run_at: row.get(4)?,
-                    error: row.get(5)?,
-                    topic_count: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        let mut statuses = Vec::new();
+        for row in rows {
+            let (
+                code,
+                display_name,
+                enabled,
+                status,
+                last_run_at,
+                error,
+                topic_count,
+                region,
+                category,
+            ) = row?;
+            statuses.push(PlatformStatusView {
+                region: parse_region(&region)?,
+                category: parse_category(&category)?,
+                code,
+                display_name,
+                enabled,
+                status,
+                last_run_at,
+                error,
+                topic_count,
+            });
+        }
         // Keep healthy sources easiest to reach in both settings and filters.
         // Within the same connectivity group, a larger current board is more
         // useful; Rust's stable sort preserves catalog order for exact ties.
@@ -874,6 +1069,56 @@ impl<'connection> TopicRepository<'connection> {
         });
         Ok(statuses)
     }
+}
+
+/// Share the exact upsert semantics between one-row edits and transactional imports.
+fn upsert_source_configuration(
+    connection: &Connection,
+    source: &SaveSourceConfiguration,
+) -> AppResult<()> {
+    let existing_builtin = connection
+        .query_row(
+            "SELECT built_in FROM platform WHERE code = ?",
+            [&source.code],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        != 0;
+    let parser_type = if existing_builtin {
+        SourceParserType::Builtin
+    } else {
+        source.parser_type
+    };
+    let parser_config = serde_json::to_string(&source.parser_config)
+        .map_err(|error| AppError::InvalidInput(format!("解析配置序列化失败：{error}")))?;
+    connection.execute(
+        "INSERT INTO platform (
+           code, display_name, home_url, feed_url, region, category, parser_type,
+           parser_config, proxy_mode, built_in, enabled, create_time, update_time
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?,
+                   datetime('now', 'localtime'), datetime('now', 'localtime'))
+         ON CONFLICT(code) DO UPDATE SET
+           display_name = excluded.display_name, home_url = excluded.home_url,
+           feed_url = excluded.feed_url, region = excluded.region,
+           category = excluded.category, parser_type = ?, parser_config = excluded.parser_config,
+           proxy_mode = excluded.proxy_mode, enabled = excluded.enabled, deleted = 0,
+           update_time = datetime('now', 'localtime')",
+        params![
+            source.code,
+            source.display_name,
+            source.home_url,
+            source.endpoint_url,
+            region_value(source.region),
+            category_value(source.category),
+            parser_type_value(parser_type),
+            parser_config,
+            proxy_mode_value(source.proxy_mode),
+            source.enabled,
+            parser_type_value(parser_type),
+        ],
+    )?;
+    Ok(())
 }
 
 /// A completed successful collection is the only positive connectivity proof;
@@ -1233,6 +1478,91 @@ mod tests {
             repository.network_settings().expect("settings should load"),
             NetworkSettings { proxy_url: None }
         );
+    }
+
+    /// Source definitions round-trip, delete softly, and catalog defaults restore explicitly.
+    #[test]
+    fn saves_deletes_and_restores_sources() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let source = SaveSourceConfiguration {
+            code: "example-json".into(),
+            display_name: "Example JSON".into(),
+            home_url: "https://example.com/".into(),
+            endpoint_url: "https://example.com/api/trending".into(),
+            region: SourceRegion::International,
+            category: TopicCategory::Developer,
+            parser_type: SourceParserType::Json,
+            proxy_mode: SourceProxyMode::Direct,
+            enabled: true,
+            parser_config: crate::models::CustomParserConfig {
+                items_path: Some("data.items".into()),
+                title_path: Some("title".into()),
+                url_path: Some("url".into()),
+                ..Default::default()
+            },
+        };
+
+        repository
+            .save_source_configuration(&source)
+            .expect("custom source should save");
+        let saved = repository
+            .source_configurations()
+            .expect("source definitions should load")
+            .into_iter()
+            .find(|candidate| candidate.code == source.code)
+            .expect("custom source should be listed");
+        assert!(!saved.built_in);
+        assert_eq!(saved.parser_type, SourceParserType::Json);
+        assert_eq!(saved.proxy_mode, SourceProxyMode::Direct);
+        assert_eq!(saved.parser_config.title_path.as_deref(), Some("title"));
+
+        let enabled = repository
+            .enabled_platforms()
+            .expect("enabled source should load")
+            .into_iter()
+            .find(|candidate| candidate.code == source.code)
+            .expect("collector should receive custom source");
+        assert_eq!(enabled.parser_type, SourceParserType::Json);
+
+        repository
+            .delete_source(&source.code)
+            .expect("custom source should soft-delete");
+        assert!(repository
+            .source_configurations()
+            .expect("remaining source definitions should load")
+            .into_iter()
+            .all(|candidate| candidate.code != source.code));
+
+        repository
+            .delete_source("qbitai")
+            .expect("default source should soft-delete");
+        assert!(repository
+            .source_configurations()
+            .expect("source definitions should load")
+            .into_iter()
+            .all(|candidate| candidate.code != "qbitai"));
+        let mut retained_custom = source.clone();
+        retained_custom.code = "retained-custom".into();
+        retained_custom.display_name = "Retained Custom".into();
+        repository
+            .import_source_configurations(&[retained_custom])
+            .expect("batch import should save atomically");
+        repository
+            .restore_default_sources()
+            .expect("catalog defaults should restore");
+        let restored = repository
+            .source_configurations()
+            .expect("restored source definitions should load");
+        assert!(restored
+            .iter()
+            .any(|candidate| candidate.code == "qbitai" && candidate.built_in));
+        assert!(restored
+            .iter()
+            .all(|candidate| candidate.code != source.code));
+        assert!(restored
+            .iter()
+            .any(|candidate| candidate.code == "retained-custom" && !candidate.built_in));
     }
 
     /// Only a clean C114 recollection may replace a legacy title containing decoding loss.

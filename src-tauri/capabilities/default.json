@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Only the main webview receives the permissions required by the Topic Desk UI.",
   "webviews": ["main"],
-  "permissions": ["core:default", "opener:allow-open-url", "opener:allow-default-urls"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "opener:allow-open-url", "opener:allow-default-urls"]
 }
