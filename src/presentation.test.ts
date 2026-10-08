@@ -1,13 +1,23 @@
 /** Deterministic tests for title-language detection and rank-history rendering. */
 
 import { describe, expect, it } from 'vitest'
-import { isEnglishTitle, parseStoredTimestamp, rankTrendPoints } from './presentation'
+import { isEnglishTitle, parseStoredTimestamp, rankTrendPoints, shouldOfferTitleTranslation } from './presentation'
 
 describe('isEnglishTitle', () => {
   it('accepts Latin-only titles and rejects titles containing CJK text', () => {
     expect(isEnglishTitle('Rust gets a smaller runtime')).toBe(true)
     expect(isEnglishTitle('Rust 发布更小的运行时')).toBe(false)
     expect(isEnglishTitle('2026 年热点')).toBe(false)
+  })
+})
+
+describe('shouldOfferTitleTranslation', () => {
+  it('translates prose from international sources but skips stable product identifiers', () => {
+    expect(shouldOfferTitleTranslation('hacker-news', 'Rust gets a smaller runtime')).toBe(true)
+    expect(shouldOfferTitleTranslation('github', 'openai/codex')).toBe(false)
+    expect(shouldOfferTitleTranslation('hugging-face', 'Qwen/Qwen3-32B')).toBe(false)
+    expect(shouldOfferTitleTranslation('coingecko', 'Bitcoin (BTC)')).toBe(false)
+    expect(shouldOfferTitleTranslation('github', 'openai/codex — A coding agent')).toBe(true)
   })
 })
 

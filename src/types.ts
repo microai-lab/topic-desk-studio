@@ -163,6 +163,14 @@ export interface StorageStatus {
   readonly latestBackup: string | null
 }
 
+/** One locally hidden topic available for explicit recovery. */
+export interface HiddenTopicView {
+  readonly id: number
+  readonly title: string
+  readonly platformName: string
+  readonly hiddenAt: string
+}
+
 /** Result returned by a local backup, restore or maintenance command. */
 export interface StorageOperationResult {
   readonly message: string

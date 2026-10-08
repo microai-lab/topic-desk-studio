@@ -15,6 +15,7 @@ use serde_json::Value;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use url::Url;
 
+use crate::catalog::google_trends_topic_url;
 use crate::database::open_database;
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -345,12 +346,20 @@ fn parse_feed(code: &str, bytes: &[u8]) -> AppResult<ParsedFeed> {
         .enumerate()
     {
         let title = entry.title.map(|value| value.content.trim().to_owned());
-        let url = entry.links.first().map(|link| link.href.clone());
+        let url = title
+            .as_deref()
+            .and_then(|title| google_trends_topic_url(code, title))
+            .or_else(|| entry.links.first().map(|link| link.href.clone()));
         if let (Some(title), Some(url)) = (title, url) {
             if valid_http_url(&url) && !title.is_empty() {
                 topics.push(CollectedTopic {
                     platform_code: code.to_owned(),
-                    stable_id: (!entry.id.trim().is_empty()).then_some(entry.id),
+                    // Google supplies the same RSS URL for every entry and feed-rs
+                    // may derive identical IDs from it; the trend phrase is the
+                    // only stable per-entry identity available in this feed.
+                    stable_id: google_trends_topic_url(code, &title)
+                        .map(|_| title.clone())
+                        .or_else(|| (!entry.id.trim().is_empty()).then_some(entry.id)),
                     title: truncate_title(&title),
                     url,
                     published_time: entry
@@ -1133,6 +1142,22 @@ mod tests {
         let feed = parse_feed("qbitai", bytes).expect("fixture should parse");
         assert!(!feed.topics.is_empty());
         assert_eq!(feed.topics[0].platform_code, "qbitai");
+    }
+
+    #[test]
+    fn google_trends_rss_items_do_not_open_the_xml_feed_or_share_an_identity() {
+        let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
+          <rss version="2.0"><channel><title>Daily Search Trends</title>
+            <item><title>sa vs aus</title><link>https://trends.google.com/trending/rss?geo=US</link></item>
+            <item><title>new model</title><link>https://trends.google.com/trending/rss?geo=US</link></item>
+          </channel></rss>"#;
+        let feed = parse_feed("google-trends-global", bytes).expect("feed should parse");
+        assert_eq!(feed.topics.len(), 2);
+        assert_eq!(feed.topics[0].stable_id.as_deref(), Some("sa vs aus"));
+        assert_eq!(feed.topics[1].stable_id.as_deref(), Some("new model"));
+        assert!(feed.topics.iter().all(|topic| {
+            topic.url.contains("/trends/explore?") && !topic.url.contains("/trending/rss")
+        }));
     }
 
     /// Tracking or script markup must not leak into titles shown in the desktop UI.

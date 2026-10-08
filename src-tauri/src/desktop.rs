@@ -7,96 +7,520 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+
+#[cfg(target_os = "macos")]
+use std::collections::HashSet;
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder},
     Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, WebviewUrl,
 };
+
+#[cfg(target_os = "macos")]
+use objc2::{
+    define_class,
+    ffi::{objc_setAssociatedObject, OBJC_ASSOCIATION_RETAIN_NONATOMIC},
+    msg_send,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, NSObject, Sel},
+    DefinedClass, MainThreadMarker, MainThreadOnly,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSData, NSObjectProtocol};
+#[cfg(target_os = "macos")]
+use objc2_web_kit::{WKDownload, WKWebViewConfiguration, WKWebsiteDataStore};
+#[cfg(target_os = "macos")]
+use zeroize::Zeroizing;
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// Wry calls the public Tauri download handler synchronously from these
+    /// delegate methods, so a thread-local safely joins its opaque event to the
+    /// native `WKDownload` without exposing a pointer outside the desktop adapter.
+    static CURRENT_DOWNLOAD_START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CURRENT_DOWNLOAD_FINISH: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(target_os = "macos")]
+fn native_download_handles() -> &'static Mutex<HashMap<i64, usize>> {
+    static HANDLES: std::sync::OnceLock<Mutex<HashMap<i64, usize>>> = std::sync::OnceLock::new();
+    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(target_os = "macos")]
+fn cancelled_downloads() -> &'static Mutex<HashSet<i64>> {
+    static CANCELLED: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Bind the database row created inside Tauri's synchronous requested callback
+/// to the native task currently passing through Wry's download delegate.
+#[cfg(target_os = "macos")]
+pub(crate) fn bind_current_native_download(id: i64) {
+    CURRENT_DOWNLOAD_START.with(|current| {
+        let pointer = current.get();
+        if pointer == 0 {
+            return;
+        }
+        unsafe {
+            objc2::ffi::objc_retain(pointer as *mut AnyObject);
+        }
+        if let Ok(mut handles) = native_download_handles().lock() {
+            if let Some(previous) = handles.insert(id, pointer) {
+                unsafe { objc2::ffi::objc_release(previous as *mut AnyObject) };
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn bind_current_native_download(_id: i64) {}
+
+/// Return the exact row whose native completion callback is currently running.
+#[cfg(target_os = "macos")]
+fn current_finished_native_download() -> Option<i64> {
+    CURRENT_DOWNLOAD_FINISH.with(|current| match current.get() {
+        0 => None,
+        id => Some(id),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_finished_native_download() -> Option<i64> {
+    None
+}
+
+/// The failure callback produced by `WKDownload.cancel` is distinguished from
+/// network failures while the native delegate is still inside the callback.
+#[cfg(target_os = "macos")]
+pub(crate) fn download_was_cancelled(id: i64) -> bool {
+    cancelled_downloads()
+        .lock()
+        .ok()
+        .is_some_and(|ids| ids.contains(&id))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn download_was_cancelled(_id: i64) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn download_policy_hook(
+    this: *mut AnyObject,
+    _command: Sel,
+    download: *mut AnyObject,
+    response: *mut AnyObject,
+    filename: *mut AnyObject,
+    completion: *mut AnyObject,
+) {
+    CURRENT_DOWNLOAD_START.with(|current| current.set(download as usize));
+    let _: () = unsafe {
+        msg_send![this, tds_download: download,
+            decideDestinationUsingResponse: response,
+            suggestedFilename: filename,
+            completionHandler: completion]
+    };
+    CURRENT_DOWNLOAD_START.with(|current| current.set(0));
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn download_finished_hook(
+    this: *mut AnyObject,
+    _command: Sel,
+    download: *mut AnyObject,
+) {
+    native_download_completion(this, download, None, None, true);
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn download_failed_hook(
+    this: *mut AnyObject,
+    _command: Sel,
+    download: *mut AnyObject,
+    error: *mut AnyObject,
+    resume_data: *mut AnyObject,
+) {
+    native_download_completion(this, download, Some(error), Some(resume_data), false);
+}
+
+/// Wrap Wry's existing delegate instead of replacing it, preserving its path,
+/// cookie and completion behavior while retaining a cancellable native handle.
+#[cfg(target_os = "macos")]
+fn native_download_completion(
+    this: *mut AnyObject,
+    download: *mut AnyObject,
+    error: Option<*mut AnyObject>,
+    resume_data: Option<*mut AnyObject>,
+    success: bool,
+) {
+    let id = native_download_handles().lock().ok().and_then(|handles| {
+        handles
+            .iter()
+            .find_map(|(id, pointer)| (*pointer == download as usize).then_some(*id))
+    });
+    CURRENT_DOWNLOAD_FINISH.with(|current| current.set(id.unwrap_or(0)));
+    unsafe {
+        if success {
+            let _: () = msg_send![this, tds_downloadDidFinish: download];
+        } else {
+            let _: () = msg_send![this, tds_download: download,
+                didFailWithError: error.unwrap_or(std::ptr::null_mut()),
+                resumeData: resume_data.unwrap_or(std::ptr::null_mut())];
+        }
+    }
+    CURRENT_DOWNLOAD_FINISH.with(|current| current.set(0));
+    if let Some(id) = id {
+        if let Ok(mut handles) = native_download_handles().lock() {
+            if let Some(pointer) = handles.remove(&id) {
+                unsafe { objc2::ffi::objc_release(pointer as *mut AnyObject) };
+            }
+        }
+        if let Ok(mut cancelled) = cancelled_downloads().lock() {
+            cancelled.remove(&id);
+        }
+    }
+}
+
+/// Install narrow wrappers around Wry's private download delegate after the
+/// first child WebView registers that class. Runtime discovery avoids pinning
+/// this adapter to Wry's versioned Objective-C class name.
+#[cfg(target_os = "macos")]
+fn install_native_download_hooks() -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let count = unsafe { objc2::ffi::objc_getClassList(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Err("无法读取浏览器下载适配器".into());
+    }
+    let mut classes = vec![std::ptr::null(); count as usize];
+    let count = unsafe { objc2::ffi::objc_getClassList(classes.as_mut_ptr(), count) };
+    let class = classes
+        .into_iter()
+        .take(count.max(0) as usize)
+        .filter(|class| !class.is_null())
+        .map(|class| unsafe { &*class })
+        .find(|class: &&AnyClass| {
+            class
+                .name()
+                .to_string_lossy()
+                .contains("wry_download_delegate::WryDownloadDelegate")
+        })
+        .ok_or("浏览器下载适配器尚未初始化")?;
+    unsafe {
+        install_download_hook(
+            class,
+            objc2::sel!(download:decideDestinationUsingResponse:suggestedFilename:completionHandler:),
+            objc2::sel!(tds_download:decideDestinationUsingResponse:suggestedFilename:completionHandler:),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(
+                    *mut AnyObject,
+                    Sel,
+                    *mut AnyObject,
+                    *mut AnyObject,
+                    *mut AnyObject,
+                    *mut AnyObject,
+                ),
+                objc2::runtime::Imp,
+            >(download_policy_hook),
+        )?;
+        install_download_hook(
+            class,
+            objc2::sel!(downloadDidFinish:),
+            objc2::sel!(tds_downloadDidFinish:),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+                objc2::runtime::Imp,
+            >(download_finished_hook),
+        )?;
+        install_download_hook(
+            class,
+            objc2::sel!(download:didFailWithError:resumeData:),
+            objc2::sel!(tds_download:didFailWithError:resumeData:),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(
+                    *mut AnyObject,
+                    Sel,
+                    *mut AnyObject,
+                    *mut AnyObject,
+                    *mut AnyObject,
+                ),
+                objc2::runtime::Imp,
+            >(download_failed_hook),
+        )?;
+    }
+    INSTALLED.store(true, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn install_download_hook(
+    class: &AnyClass,
+    original_selector: Sel,
+    replacement_selector: Sel,
+    replacement: objc2::runtime::Imp,
+) -> Result<(), String> {
+    let original = unsafe { objc2::ffi::class_getInstanceMethod(class, original_selector) };
+    if original.is_null() {
+        return Err(format!("缺少原生下载方法 {original_selector}"));
+    }
+    let encoding = unsafe { objc2::ffi::method_getTypeEncoding(original) };
+    let added = unsafe {
+        objc2::ffi::class_addMethod(
+            (class as *const AnyClass).cast_mut(),
+            replacement_selector,
+            replacement,
+            encoding,
+        )
+    };
+    if !added.as_bool() {
+        return Err(format!("无法安装原生下载方法 {replacement_selector}"));
+    }
+    let replacement = unsafe { objc2::ffi::class_getInstanceMethod(class, replacement_selector) };
+    if replacement.is_null() {
+        return Err(format!("无法读取原生下载方法 {replacement_selector}"));
+    }
+    unsafe {
+        objc2::ffi::method_exchangeImplementations(original.cast_mut(), replacement.cast_mut());
+    }
+    Ok(())
+}
+
+/// Cancel the exact native task on AppKit; the resulting failure callback
+/// updates SQLite to `cancelled` and removes the partial file.
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_download(app: &tauri::AppHandle, id: i64) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            let pointer = native_download_handles()
+                .lock()
+                .map_err(|error| error.to_string())?
+                .get(&id)
+                .copied()
+                .ok_or_else(|| "下载任务已经结束".to_string())?;
+            cancelled_downloads()
+                .lock()
+                .map_err(|error| error.to_string())?
+                .insert(id);
+            let download = unsafe { &*(pointer as *const WKDownload) };
+            unsafe { download.cancel(None) };
+            Ok(())
+        })();
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "取消下载超时".to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn cancel_download(_app: &tauri::AppHandle, _id: i64) -> Result<(), String> {
+    Err("当前系统暂不支持取消内置浏览器下载".into())
+}
+
+#[cfg(target_os = "macos")]
+struct EphemeralWebCryptoDelegateIvars {
+    /// This key exists only for the lifetime of one temporary website data store.
+    key: Zeroizing<[u8; 32]>,
+}
+
+#[cfg(target_os = "macos")]
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = EphemeralWebCryptoDelegateIvars]
+    struct EphemeralWebCryptoDelegate;
+
+    unsafe impl NSObjectProtocol for EphemeralWebCryptoDelegate {}
+
+    impl EphemeralWebCryptoDelegate {
+        /// WebKit calls this SPI before wrapping a serialized CryptoKey. Returning
+        /// process-memory bytes prevents its fallback from querying macOS Keychain.
+        #[unsafe(method(webCryptoMasterKey:))]
+        fn web_crypto_master_key(
+            &self,
+            completion: &block2::Block<dyn Fn(*mut NSData)>,
+        ) {
+            let key = unsafe {
+                NSData::dataWithBytes_length(
+                    self.ivars().key.as_ptr().cast(),
+                    self.ivars().key.len(),
+                )
+            };
+            (*completion).call((Retained::as_ptr(&key).cast_mut(),));
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+impl EphemeralWebCryptoDelegate {
+    /// Allocate a per-data-store key without touching any operating-system vault.
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        use aes_gcm::aead::rand_core::RngCore;
+
+        let mut key = Zeroizing::new([0_u8; 32]);
+        aes_gcm::aead::OsRng.fill_bytes(&mut *key);
+        let delegate = mtm
+            .alloc::<Self>()
+            .set_ivars(EphemeralWebCryptoDelegateIvars { key });
+        unsafe { msg_send![super(delegate), init] }
+    }
+}
+
+/// A configuration created on the AppKit thread may be transferred without
+/// access back to Tauri's dispatcher, which consumes it on that same thread.
+/// `WKWebViewConfiguration` itself is intentionally not generally `Send`.
+#[cfg(target_os = "macos")]
+struct MainThreadWebviewConfiguration(Retained<WKWebViewConfiguration>);
+
+#[cfg(target_os = "macos")]
+// SAFETY: this wrapper is only used to carry an AppKit-created configuration
+// into Tauri's synchronous main-thread builder call; it is never accessed on
+// the command worker thread.
+unsafe impl Send for MainThreadWebviewConfiguration {}
+
+/// Configure macOS article views on the AppKit thread before navigation starts.
+/// WebKit's private delegate hook is runtime-checked because it arrived in macOS 15.
+#[cfg(target_os = "macos")]
+fn article_webview_configuration_on_main() -> Result<Retained<WKWebViewConfiguration>, String> {
+    use std::ffi::c_void;
+
+    static DELEGATE_ASSOCIATION_KEY: u8 = 0;
+    let mtm = MainThreadMarker::new().ok_or("浏览器配置必须在主线程创建")?;
+    let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+    let data_store = unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+    unsafe { configuration.setWebsiteDataStore(&data_store) };
+
+    if !data_store.respondsToSelector(objc2::sel!(set_delegate:)) {
+        return Err("当前 macOS WebKit 无法隔离浏览器加密密钥".into());
+    }
+    let delegate = EphemeralWebCryptoDelegate::new(mtm);
+    unsafe {
+        let _: () = msg_send![&*data_store, set_delegate: &*delegate];
+        // The WebKit SPI keeps only a weak delegate. Associate it strongly
+        // with the temporary store so both have exactly the same lifetime.
+        objc_setAssociatedObject(
+            Retained::as_ptr(&data_store) as *mut AnyObject,
+            (&DELEGATE_ASSOCIATION_KEY as *const u8).cast::<c_void>(),
+            Retained::as_ptr(&delegate) as *mut AnyObject,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+        );
+    }
+    Ok(configuration)
+}
+
+/// Marshal native configuration creation to AppKit, then immediately return
+/// ownership to Tauri's builder without accessing the object off that thread.
+#[cfg(target_os = "macos")]
+fn article_webview_configuration(
+    app: &tauri::AppHandle,
+) -> Result<Retained<WKWebViewConfiguration>, String> {
+    if MainThreadMarker::new().is_some() {
+        return article_webview_configuration_on_main();
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = article_webview_configuration_on_main().map(MainThreadWebviewConfiguration);
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "创建浏览器配置超时".to_string())?
+        .map(|configuration| configuration.0)
+}
 
 /// Keep ordinary `target=_blank` links inside the single reading pane. The
 /// native new-window handler below remains the security backstop for scripts
 /// that call `window.open` directly.
 const ARTICLE_INITIALIZATION_SCRIPT: &str = r#"
 (() => {
-  // WKWebView asks macOS Keychain for an application-wide master key when an
-  // untrusted page serializes a CryptoKey into IndexedDB. A value-level guard
-  // is insufficient because WebKit may begin native serialization before the
-  // wrapper can inspect every host object. Reader views therefore reject all
-  // IndexedDB database access. Cookies remain available for site login during
-  // the ephemeral view lifetime, while no persistent WebCrypto key can form.
-  const factory = globalThis.IDBFactory?.prototype;
-  for (const method of ['open', 'deleteDatabase']) {
-    const descriptor = factory && Object.getOwnPropertyDescriptor(factory, method);
-    if (!descriptor || typeof descriptor.value !== 'function') continue;
-    Object.defineProperty(factory, method, {
-      ...descriptor,
-      configurable: false,
-      writable: false,
-      value() {
-        throw new DOMException(
-          'IndexedDB is disabled in the temporary reader',
-          'SecurityError',
-        );
-      },
-    });
-  }
-
-  // Keep a second guard on already-open handles in case WebKit supplied one to
-  // a page object before this frame-level initialization script ran.
+  // WebKit only requests its application master key when a CryptoKey enters a
+  // structured-clone path. Reader pages may use ordinary IndexedDB data, but
+  // keys must stay in page memory so WebKit never reaches macOS Keychain.
   const CryptoKeyType = globalThis.CryptoKey;
-  if (typeof CryptoKeyType === 'function') {
-    const containsCryptoKey = (root) => {
-      const pending = [root];
-      const seen = new WeakSet();
-      while (pending.length) {
-        const value = pending.pop();
-        if (value instanceof CryptoKeyType) return true;
-        if (value === null || (typeof value !== 'object' && typeof value !== 'function')) continue;
-        if (seen.has(value)) continue;
-        seen.add(value);
-        if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) continue;
-        if (globalThis.Blob && value instanceof Blob) continue;
-        if (value instanceof Date || value instanceof RegExp) continue;
-        if (value instanceof Map) {
-          for (const [key, item] of value) pending.push(key, item);
-          continue;
-        }
-        if (value instanceof Set) {
-          for (const item of value) pending.push(item);
-          continue;
-        }
-        try {
-          for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-            if ('value' in descriptor) pending.push(descriptor.value);
-          }
-        } catch (_) {}
+  if (typeof CryptoKeyType !== 'function') return;
+
+  const containsCryptoKey = (root) => {
+    const pending = [root];
+    const seen = new WeakSet();
+    while (pending.length) {
+      const value = pending.pop();
+      if (value instanceof CryptoKeyType) return true;
+      if (value === null || (typeof value !== 'object' && typeof value !== 'function')) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) continue;
+      if (globalThis.Blob && value instanceof Blob) continue;
+      if (value instanceof Date || value instanceof RegExp) continue;
+      if (value instanceof Map) {
+        for (const [key, item] of value) pending.push(key, item);
+        continue;
       }
-      return false;
-    };
-    const writeMethods = [
-      [globalThis.IDBObjectStore?.prototype, 'add'],
-      [globalThis.IDBObjectStore?.prototype, 'put'],
-      [globalThis.IDBCursor?.prototype, 'update'],
-    ];
-    for (const [prototype, method] of writeMethods) {
-      if (!prototype) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
-      if (!descriptor || typeof descriptor.value !== 'function') continue;
-      const nativeMethod = descriptor.value;
+      if (value instanceof Set) {
+        for (const item of value) pending.push(item);
+        continue;
+      }
+      try {
+        for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+          if ('value' in descriptor) pending.push(descriptor.value);
+        }
+      } catch (_) {}
+    }
+    return false;
+  };
+
+  const rejectCryptoKey = (value) => {
+    if (containsCryptoKey(value)) {
+      throw new DOMException(
+        'CryptoKey persistence is disabled in the temporary reader',
+        'DataCloneError',
+      );
+    }
+  };
+  const wrapFirstArgument = (prototype, method) => {
+    if (!prototype) return;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
+    if (!descriptor || typeof descriptor.value !== 'function') return;
+    const nativeMethod = descriptor.value;
+    try {
       Object.defineProperty(prototype, method, {
         ...descriptor,
-        configurable: false,
-        writable: false,
         value(value, ...args) {
-          if (containsCryptoKey(value)) {
-            throw new DOMException(
-              'CryptoKey persistence is disabled in the temporary reader',
-              'DataCloneError',
-            );
-          }
+          rejectCryptoKey(value);
           return Reflect.apply(nativeMethod, this, [value, ...args]);
         },
       });
-    }
+    } catch (_) {}
+  };
+
+  for (const [prototype, method] of [
+    [globalThis.IDBObjectStore?.prototype, 'add'],
+    [globalThis.IDBObjectStore?.prototype, 'put'],
+    [globalThis.IDBCursor?.prototype, 'update'],
+    [globalThis.Window?.prototype, 'postMessage'],
+    [globalThis.Worker?.prototype, 'postMessage'],
+    [globalThis.MessagePort?.prototype, 'postMessage'],
+    [globalThis.BroadcastChannel?.prototype, 'postMessage'],
+    [globalThis.ServiceWorker?.prototype, 'postMessage'],
+  ]) wrapFirstArgument(prototype, method);
+
+  const nativeStructuredClone = globalThis.structuredClone;
+  if (typeof nativeStructuredClone === 'function') {
+    try {
+      Object.defineProperty(globalThis, 'structuredClone', {
+        configurable: true,
+        writable: true,
+        value(value, options) {
+          rejectCryptoKey(value);
+          return nativeStructuredClone.call(this, value, options);
+        },
+      });
+    } catch (_) {}
   }
 })();
 document.addEventListener('contextmenu', (event) => event.preventDefault(), true);
@@ -220,6 +644,83 @@ pub(crate) fn tab_label(tab_id: &str) -> Result<String, String> {
         return Err("无效浏览器标签页".into());
     }
     Ok(format!("article-{tab_id}"))
+}
+
+/// A readable main document ends the chrome spinner independently of slow embeds.
+#[derive(Deserialize)]
+struct DocumentReadiness {
+    url: String,
+    state: String,
+    origin: f64,
+}
+
+impl DocumentReadiness {
+    fn ready_for(&self, expected_url: &str, previous_origin: Option<f64>) -> bool {
+        self.url == expected_url
+            && matches!(self.state.as_str(), "interactive" | "complete")
+            && self.origin.is_finite()
+            && self.origin > 0.0
+            && previous_origin != Some(self.origin)
+    }
+}
+
+/// Poll only during one navigation. No script receives IPC privileges; probes
+/// read the main document and stop on completion, replacement, closure or timeout.
+fn watch_document_readiness(
+    view: tauri::Webview,
+    tab_id: String,
+    url: String,
+    generation: u64,
+    previous_origin: Option<f64>,
+) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let loading = {
+                let profile = view.app_handle().state::<BrowserProfile>();
+                let Ok(session) = profile.inner.lock() else {
+                    break;
+                };
+                let Some(tab) = session.tabs.get(&tab_id) else {
+                    break;
+                };
+                if tab.load_generation != generation || tab.status.url != url {
+                    break;
+                }
+                tab.status.loading
+            };
+            let (sender, receiver) = std::sync::mpsc::channel();
+            if view
+                .eval_with_callback(
+                    "({url:location.href,state:document.readyState,origin:performance.timeOrigin})",
+                    move |value| {
+                        let _ = sender.send(value);
+                    },
+                )
+                .is_err()
+            {
+                break;
+            }
+            if let Ok(raw) = receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+                if let Ok(readiness) = serde_json::from_str::<DocumentReadiness>(&raw) {
+                    if readiness.ready_for(&url, previous_origin) {
+                        browser_profile::page_ready(
+                            view.app_handle(),
+                            &tab_id,
+                            &url,
+                            generation,
+                            readiness.origin,
+                        );
+                        break;
+                    }
+                }
+            }
+            if !loading {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    });
 }
 
 fn hide_article_views(app: &tauri::AppHandle, except: Option<&str>) -> Result<(), String> {
@@ -361,8 +862,10 @@ pub fn browser_request(
                 // WebKit reports no destination in the finished event on
                 // macOS, so retain the native-assigned path by URL until the
                 // matching completion arrives.
-                let pending_downloads =
-                    Arc::new(Mutex::new(HashMap::<String, VecDeque<PathBuf>>::new()));
+                let pending_downloads = Arc::new(Mutex::new(HashMap::<
+                    String,
+                    VecDeque<(Option<i64>, PathBuf)>,
+                >::new()));
                 let download_paths = pending_downloads.clone();
                 let builder = WebviewBuilder::new(label, WebviewUrl::External(url))
                     // Ephemeral article views must never create WebCrypto or password material
@@ -381,9 +884,27 @@ pub fn browser_request(
                         let Ok(current) = view.url() else {
                             return;
                         };
-                        browser_profile::navigated(view.app_handle(), &page_tab, current.as_str());
+                        // Child-frame events must not restart the top-level spinner.
+                        if payload.url() != &current {
+                            return;
+                        }
                         match payload.event() {
                             PageLoadEvent::Started => {
+                                if let Some((generation, previous_origin)) =
+                                    browser_profile::navigated(
+                                        view.app_handle(),
+                                        &page_tab,
+                                        current.as_str(),
+                                    )
+                                {
+                                    watch_document_readiness(
+                                        view.clone(),
+                                        page_tab.clone(),
+                                        current.to_string(),
+                                        generation,
+                                        previous_origin,
+                                    );
+                                }
                                 // Let WebKit paint the response progressively instead of
                                 // withholding usable content until every slow subresource
                                 // finishes. The trusted React chrome keeps showing its
@@ -453,26 +974,60 @@ pub fn browser_request(
                                     browser_profile::now(),
                                     if name.is_empty() { "download" } else { &name }
                                 ));
+                                let record_id = browser_profile::start_download(
+                                    view.app_handle(),
+                                    url.as_str(),
+                                    destination,
+                                )
+                                .ok();
                                 if let Ok(mut pending) = download_paths.lock() {
                                     pending
                                         .entry(url.to_string())
                                         .or_default()
-                                        .push_back(destination.clone());
+                                        .push_back((record_id, destination.clone()));
                                 }
                             }
                             DownloadEvent::Finished { url, path, success } => {
-                                let fallback =
+                                let finishing_id = current_finished_native_download();
+                                let pending_download =
                                     download_paths.lock().ok().and_then(|mut pending| {
-                                        let path = pending
-                                            .get_mut(url.as_str())
-                                            .and_then(VecDeque::pop_front);
+                                        let download =
+                                            pending.get_mut(url.as_str()).and_then(|queue| {
+                                                finishing_id
+                                                    .and_then(|id| {
+                                                        queue
+                                                            .iter()
+                                                            .position(|(record_id, _)| {
+                                                                *record_id == Some(id)
+                                                            })
+                                                            .and_then(|index| queue.remove(index))
+                                                    })
+                                                    .or_else(|| queue.pop_front())
+                                            });
                                         if pending.get(url.as_str()).is_some_and(VecDeque::is_empty)
                                         {
                                             pending.remove(url.as_str());
                                         }
-                                        path
+                                        download
                                     });
-                                if let Some(path) = path.or(fallback) {
+                                if let Some((record_id, fallback)) = pending_download {
+                                    let path = path.as_deref().unwrap_or(&fallback);
+                                    if let Some(record_id) = record_id {
+                                        browser_profile::finish_download(
+                                            view.app_handle(),
+                                            record_id,
+                                            path,
+                                            success,
+                                        );
+                                    } else {
+                                        browser_profile::record_download(
+                                            view.app_handle(),
+                                            url.as_str(),
+                                            path,
+                                            if success { "complete" } else { "failed" },
+                                        );
+                                    }
+                                } else if let Some(path) = path {
                                     browser_profile::record_download(
                                         view.app_handle(),
                                         url.as_str(),
@@ -506,11 +1061,17 @@ pub fn browser_request(
                         }
                         NewWindowResponse::Deny
                     });
-                app.get_window("main")
+                #[cfg(target_os = "macos")]
+                let builder =
+                    builder.with_webview_configuration(article_webview_configuration(app)?);
+                let view = app
+                    .get_window("main")
                     .ok_or("主窗口不存在")?
                     .add_child(builder, position, size)
-                    .and_then(|view| view.set_zoom(zoom))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                #[cfg(target_os = "macos")]
+                install_native_download_hooks()?;
+                view.set_zoom(zoom).map_err(|error| error.to_string())
             } else {
                 Ok(())
             }
@@ -611,6 +1172,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn readable_document_finishes_before_slow_subresources_without_accepting_old_pages() {
+        let mut document = DocumentReadiness {
+            url: "https://example.com/article".into(),
+            state: "interactive".into(),
+            origin: 200.0,
+        };
+        assert!(document.ready_for("https://example.com/article", Some(100.0)));
+        assert!(!document.ready_for("https://example.com/article", Some(200.0)));
+        assert!(!document.ready_for("https://example.com/next", None));
+        document.state = "loading".into();
+        assert!(!document.ready_for("https://example.com/article", None));
+        document.state = "complete".into();
+        assert!(document.ready_for("https://example.com/article", None));
+        document.origin = f64::NAN;
+        assert!(!document.ready_for("https://example.com/article", None));
+    }
+
+    #[test]
     fn rejects_invalid_native_bounds() {
         let mut bounds = BrowserBounds {
             x: 220.0,
@@ -700,17 +1279,22 @@ mod tests {
     }
 
     #[test]
-    fn article_bootstrap_blocks_persistent_webcrypto_storage() {
+    fn article_bootstrap_blocks_persistent_webcrypto_without_disabling_indexeddb() {
         for required_guard in [
-            "IDBFactory?.prototype",
-            "['open', 'deleteDatabase']",
             "IDBObjectStore?.prototype",
+            "IDBCursor?.prototype",
             "CryptoKey persistence is disabled",
+            "structuredClone",
+            "contextmenu",
+            "event.composedPath()",
+            "window.location.assign",
         ] {
             assert!(
                 ARTICLE_INITIALIZATION_SCRIPT.contains(required_guard),
                 "reader bootstrap must retain {required_guard}"
             );
         }
+        assert!(!ARTICLE_INITIALIZATION_SCRIPT.contains("IDBFactory?.prototype"));
+        assert!(!ARTICLE_INITIALIZATION_SCRIPT.contains("deleteDatabase"));
     }
 }

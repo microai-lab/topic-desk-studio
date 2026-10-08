@@ -1,58 +1,65 @@
 # AGENTS.md
 
-## 项目目标
+## Project Goals
 
-- 本仓库构建独立的 Topic Desk 桌面应用，不依赖 DeepSeek Harness 运行时。
-- 正式桌面目标为 Windows、macOS 与 Linux；公共核心不得阻碍未来的 iOS 适配。
-- 桌面容器使用 Tauri 2，界面使用 React/Vite，采集与 SQLite 业务核心使用 Rust。
+- This repository builds a standalone Topic Desk desktop application without depending on the DeepSeek Harness runtime.
+- The production desktop targets are Windows, macOS, and Linux. The shared core must not prevent future iOS adaptation.
+- The desktop shell uses Tauri 2, the UI uses React/Vite, and the collection and SQLite business core use Rust.
 
-## 源码注释
+## Source Code Comments
 
-- 每个源码文件必须包含模块或职责说明。
-- 公共类型、公共函数、Tauri command、数据库事务与不直观的业务规则必须写注释。
-- 注释应解释约束和原因，不要逐行复述代码。
+- Every source file must include a description of its module or responsibility.
+- Public types, public functions, Tauri commands, database transactions, and non-obvious business rules must be documented.
+- Comments should explain constraints and rationale rather than restating the code line by line.
 
-## 仓库卫生
+## Repository Hygiene
 
-- `.DS_Store` 不得存在于仓库中；发现后立即删除。
-- 不提交 API Key、凭据、SQLite 运行数据、日志、构建产物或签名材料。
-- 保留用户已有的未提交修改，不重置或覆盖无关文件。
+- `.DS_Store` files must not exist in the repository. Delete them immediately when found.
+- Do not commit API keys, credentials, SQLite runtime data, logs, build artifacts, or signing materials.
+- Preserve the user's existing uncommitted changes. Do not reset or overwrite unrelated files.
 
-## 架构边界
+## Architectural Boundaries
 
-- React 页面只能通过类型化的 Tauri commands/events 访问本地能力。
-- 网络采集、SQLite、代理、定时器和凭据访问只能位于 Rust 后端。
-- 来源返回内容一律视为不可信输入；校验、标准化后才能持久化或展示。
-- 话题原文链接在主窗口右侧的独立原文阅读区打开，仅允许 HTTP(S) 导航；外部页面不得获得主界面 WebView 权限。
-- 平台专属能力放入 `desktop` 或未来的 `mobile` adapter，不能污染公共核心。
+- React pages may access local capabilities only through typed Tauri commands and events.
+- Network collection, SQLite, proxy handling, timers, and credential access must reside exclusively in the Rust backend.
+- Treat all content returned by sources as untrusted input. Validate and normalize it before persistence or display.
+- Open original topic links in the dedicated article-reading pane on the right side of the main window, allowing only HTTP(S) navigation. External pages must never receive the main UI WebView's privileges.
+- Place platform-specific capabilities in the `desktop` adapter or a future `mobile` adapter; they must not contaminate the shared core.
 
-## 数据不变量
+## Data Invariants
 
-- 话题身份优先级为：平台稳定 ID、规范化 URL、规范化标题。
-- SHA-256 输入保持 `v1\0<platform_code>\0<identity_kind>\0<normalized_identity>`。
-- 排名、热度与采集时间不参与身份计算。
-- 重复话题保留首次标题、URL、发布时间和创建时间。
-- 单个来源失败不得阻止其他来源提交。
+- Topic identity priority is: platform-stable ID, normalized URL, then normalized title.
+- Keep the SHA-256 input format as `v1\0<platform_code>\0<identity_kind>\0<normalized_identity>`.
+- Rank, popularity, and collection time must not participate in identity computation.
+- Duplicate topics retain the first observed title, URL, publication time, and creation time.
+- A failure in one source must not prevent other sources from committing successfully.
 
-## 模型凭据不变量
+## Model Credential Invariants
 
-- 模型 API Key 必须先使用 AES-256-GCM 和每次独立生成的随机 nonce 加密，SQLite 只允许持久化算法标识、nonce 与认证密文，不得出现明文 Key 列或明文设置项。
-- 模型凭据加密主密钥必须使用应用数据目录中的独立随机密钥文件，支持的平台应限制为仅当前用户可读写；不得写入 SQLite、日志或前端状态。
-- API Key 只能在 Rust 原生层按需解密；明文不得返回 WebView，并应使用可清零内存，在构造模型请求头后尽快释放。
-- 密文算法不受支持、主密钥丢失、nonce 非法或认证失败时必须拒绝调用，不能降级为明文读取或忽略完整性校验。
-- 数据库迁移必须先成功加密旧凭据，再在同一事务中删除明文结构；迁移失败时保留旧数据和旧版本号，禁止产生半迁移状态。
-- 应用不得访问操作系统钥匙串、Credential Manager 或 Secret Service，也不得提供浏览器密码保存、导入、填充功能。
-- 内置原文阅读 WebView 必须使用临时数据存储，禁止创建持久 WebCrypto 主密钥或网站密码材料。
-- 旧系统凭据库主密钥加密的 v5 模型密文不得再读取；升级时清除该密文并要求用户重新输入 API Key。
+- Model API keys must be encrypted with AES-256-GCM and an independently generated random nonce for every encryption operation. SQLite may persist only the algorithm identifier, nonce, and authenticated ciphertext; plaintext key columns or plaintext settings are prohibited.
+- The master key used to encrypt model credentials must be stored in a separate random key file inside the application data directory. On supported platforms, access must be restricted to the current user. The key must never be written to SQLite, logs, or frontend state.
+- API keys may be decrypted only on demand in the native Rust layer. Plaintext must never be returned to the WebView, must use zeroizable memory, and must be released as soon as possible after constructing the model request headers.
+- Reject model requests when the ciphertext algorithm is unsupported, the master key is missing, the nonce is invalid, or authentication fails. Never fall back to plaintext reads or ignore integrity failures.
+- Database migrations must successfully encrypt legacy credentials before removing the plaintext structure within the same transaction. If migration fails, preserve the old data and schema version; partial migration states are prohibited.
+- The application must not access the operating system Keychain, Credential Manager, or Secret Service, and must not provide browser password saving, importing, or autofill capabilities.
+- The built-in article-reading WebView must use temporary data storage and must not create persistent WebCrypto master keys or website password material.
+- Version 5 model ciphertext encrypted with a legacy system credential-store master key must no longer be read. During upgrade, clear that ciphertext and require the user to enter the API key again.
 
-## 文档边界
+## Documentation Boundaries
 
-- README 只描述产品能力、用户工作流、支持平台、使用方式与用户可感知的隐私行为。
-- 架构边界、数据库表结构、加密算法、密钥管理、迁移步骤、代码检查命令等实现细节应固化在 `AGENTS.md`、源码注释或开发文档中，不写入 README。
-- README 可以说明“API Key 在本地加密保存且不会暴露给页面”，但不展开算法、字段、主密钥位置或版本迁移过程。
+- The README should describe only product capabilities, user workflows, supported platforms, usage, and user-visible privacy behavior.
+- Implementation details such as architectural boundaries, database schemas, encryption algorithms, key management, migration steps, and code-validation commands belong in `AGENTS.md`, source comments, or developer documentation—not in the README.
+- The README may state that “API keys are encrypted locally and are never exposed to pages,” but must not describe algorithms, fields, master-key locations, or version-migration procedures.
 
-## 完成检查
+## Testing Requirements
 
-- TypeScript 修改至少运行 `pnpm typecheck` 与相关测试。
-- Rust 修改至少运行 `cargo fmt --check`、`cargo test` 与 `cargo clippy -- -D warnings`。
-- 交付桌面构建前运行对应系统的真实安装包冒烟测试。
+- Every new or changed feature must include unit tests at the lowest practical layer. A feature is incomplete when its tests are missing, skipped, or disabled.
+- Test the successful path, input and boundary validation, and important failure behavior. Every bug fix must add a regression test that reproduces the previous failure.
+- Keep frontend business and presentation rules in pure testable modules instead of burying them inside React components. Test Rust network, storage, and native boundaries with deterministic fixtures, in-memory databases, or fakes; unit tests must not require live external services.
+- Changes pushed to GitHub and pull requests must pass the repository's GitHub Actions workflow on every supported desktop operating system before release.
+
+## Completion Checks
+
+- For TypeScript changes, run at minimum `pnpm typecheck`, `pnpm test`, and the relevant focused tests.
+- For Rust changes, run at minimum `cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`.
+- Before delivering a desktop build, run a smoke test using a real installer package on the corresponding operating system.

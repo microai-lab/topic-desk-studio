@@ -10,6 +10,9 @@ export interface Messages {
   navQueue: string
   navNew: string
   navSettings: string
+  navMain: string
+  sidebarCollapse: string
+  sidebarExpand: string
   // Topbar
   btnRefresh: string
   btnRefreshing: string
@@ -100,7 +103,21 @@ export interface Messages {
   storageBackup: string
   storageRestore: string
   storageWorking: string
+  storageOptimizeConfirm: string
+  storageBackupConfirm: string
   storageRestoreConfirm: string
+  storageHiddenHeading: string
+  storageHiddenDesc: string
+  storageHiddenEmpty: string
+  storageHiddenCount: (n: number) => string
+  storageHiddenSearchPlaceholder: string
+  storageHiddenClearSearch: string
+  storageHiddenNoMatches: string
+  storageHiddenPagination: string
+  storageRestoreTopic: string
+  storageRestoreAllTopics: string
+  storageTopicRestored: string
+  storageAllTopicsRestored: string
   // Sources tab
   regionDomestic: string
   regionIntl: string
@@ -165,6 +182,9 @@ const zh: Messages = {
   navQueue: '待创作',
   navNew: '最近新增',
   navSettings: '设置',
+  navMain: '主导航',
+  sidebarCollapse: '收起侧边栏',
+  sidebarExpand: '展开侧边栏',
   btnRefresh: '采集数据',
   btnRefreshing: '采集中…',
   btnQuery: '刷新列表',
@@ -247,7 +267,21 @@ const zh: Messages = {
   storageBackup: '创建备份',
   storageRestore: '恢复最近备份',
   storageWorking: '处理中…',
+  storageOptimizeConfirm: '将清理过期的趋势、采集和浏览记录，并优化本地数据库。是否立即整理？',
+  storageBackupConfirm: '将创建当前本地数据与设置的备份。最多保留最近 3 份备份，超出后会删除最早的一份。是否创建备份？',
   storageRestoreConfirm: '恢复将覆盖当前本地数据，并保留下载文件。确定继续吗？',
+  storageHiddenHeading: '已隐藏话题',
+  storageHiddenDesc: '在“发现选题”中选择“不再显示”的话题会保存在这里。恢复后，后续采集可以继续更新相同话题。',
+  storageHiddenEmpty: '暂无隐藏话题',
+  storageHiddenCount: (n) => `${n} 条`,
+  storageHiddenSearchPlaceholder: '搜索标题或来源…',
+  storageHiddenClearSearch: '清除搜索',
+  storageHiddenNoMatches: '没有匹配的隐藏话题',
+  storageHiddenPagination: '已隐藏话题分页',
+  storageRestoreTopic: '恢复显示',
+  storageRestoreAllTopics: '全部恢复',
+  storageTopicRestored: '话题已恢复显示。',
+  storageAllTopicsRestored: '全部隐藏话题已恢复。',
   regionDomestic: '国内',
   regionIntl: '国际',
   notCollected: '尚未采集',
@@ -302,7 +336,7 @@ const zh: Messages = {
   apiKeySavedPlaceholder: '已保存；留空表示不修改',
   btnSave: '保存设置',
   btnSaving: '保存中…',
-  saveNotice: '模型设置已保存到本地 SQLite。',
+  saveNotice: '保存成功',
 }
 
 const en: Messages = {
@@ -310,6 +344,9 @@ const en: Messages = {
   navQueue: 'Queue',
   navNew: 'Recent additions',
   navSettings: 'Settings',
+  navMain: 'Main navigation',
+  sidebarCollapse: 'Collapse sidebar',
+  sidebarExpand: 'Expand sidebar',
   btnRefresh: 'Collect',
   btnRefreshing: 'Collecting…',
   btnQuery: 'Refresh list',
@@ -392,7 +429,21 @@ const en: Messages = {
   storageBackup: 'Create backup',
   storageRestore: 'Restore latest',
   storageWorking: 'Working…',
+  storageOptimizeConfirm: 'Remove expired trend, collection, and browser records, then optimize the local databases. Optimize now?',
+  storageBackupConfirm: 'Create a backup of your current local data and settings. Only the latest 3 backups are kept; the oldest is removed when this limit is exceeded. Create backup?',
   storageRestoreConfirm: 'Restoring replaces current local data but keeps downloaded files. Continue?',
+  storageHiddenHeading: 'Hidden topics',
+  storageHiddenDesc: 'Topics hidden from Discover are kept here. Restoring allows future collections to update the same topic again.',
+  storageHiddenEmpty: 'No hidden topics',
+  storageHiddenCount: (n) => `${n} hidden`,
+  storageHiddenSearchPlaceholder: 'Search title or source…',
+  storageHiddenClearSearch: 'Clear search',
+  storageHiddenNoMatches: 'No matching hidden topics',
+  storageHiddenPagination: 'Hidden topics pages',
+  storageRestoreTopic: 'Restore',
+  storageRestoreAllTopics: 'Restore all',
+  storageTopicRestored: 'Topic restored.',
+  storageAllTopicsRestored: 'All hidden topics restored.',
   regionDomestic: 'China',
   regionIntl: 'Intl',
   notCollected: 'Not yet collected',
@@ -447,7 +498,7 @@ const en: Messages = {
   apiKeySavedPlaceholder: 'Saved — leave blank to keep',
   btnSave: 'Save settings',
   btnSaving: 'Saving…',
-  saveNotice: 'Model settings saved to local SQLite.',
+  saveNotice: 'Saved successfully',
 }
 
 export const messages: Record<Locale, Messages> = { zh, en }

@@ -19,11 +19,12 @@ mod translator;
 use commands::{
     backup_storage, browser_request, collect_xiaohongshu_session, delete_source,
     export_source_configurations, get_model_settings, get_network_settings, get_storage_status,
-    get_ui_preferences, hide_topic, import_source_configurations, list_source_configurations,
-    list_topics, open_data_directory, optimize_storage, refresh_topics,
-    reorder_source_configurations, restore_default_sources, restore_latest_backup,
-    save_model_settings, save_network_settings, save_source_configuration, save_ui_preferences,
-    set_platform_enabled, set_topic_queued, translate_topic, AppState,
+    get_ui_preferences, hide_topic, import_source_configurations, list_hidden_topics,
+    list_source_configurations, list_topics, open_data_directory, optimize_storage, refresh_topics,
+    reorder_source_configurations, restore_all_hidden_topics, restore_default_sources,
+    restore_hidden_topic, restore_latest_backup, save_model_settings, save_network_settings,
+    save_source_configuration, save_ui_preferences, set_platform_enabled, set_topic_queued,
+    translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,6 +43,9 @@ pub fn run() {
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
                 database::open_database(&database_path).map_err(|error| error.to_string())?;
+            repository::TopicRepository::new(&database)
+                .repair_legacy_google_trends_urls()
+                .map_err(|error| error.to_string())?;
             let refreshing = Arc::new(AtomicBool::new(false));
             app.manage(AppState {
                 database: std::sync::Mutex::new(database),
@@ -108,6 +112,9 @@ pub fn run() {
             get_network_settings,
             save_network_settings,
             get_storage_status,
+            list_hidden_topics,
+            restore_hidden_topic,
+            restore_all_hidden_topics,
             backup_storage,
             restore_latest_backup,
             optimize_storage,

@@ -2,42 +2,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Compass, Database, Download, EyeOff, FolderOpen, GripVertical, HardDrive, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, Settings, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Database, Download, EyeOff, FolderOpen, GripVertical, HardDrive, LoaderCircle, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
   backupStorage, browserRequest, collectXiaohongshuSession, deleteSource, exportSourceConfigurations, hideTopic,
-  getModelSettings, getNetworkSettings, getStorageStatus, getUiPreferences, importSourceConfigurations, listSourceConfigurations, listTopics,
+  getModelSettings, getNetworkSettings, getStorageStatus, getUiPreferences, importSourceConfigurations, listHiddenTopics, listSourceConfigurations, listTopics,
   openDataDirectory, optimizeStorage, refreshTopics, restoreLatestBackup, saveModelSettings,
-  reorderSourceConfigurations, restoreDefaultSources, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
+  reorderSourceConfigurations, restoreAllHiddenTopics, restoreDefaultSources, restoreHiddenTopic, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
   setTopicQueued, translateTopic,
 } from './api'
 import { BrowserPane } from './BrowserPane'
+import { Sidebar } from './Sidebar'
+import type { SidebarView } from './Sidebar'
+import { DEFAULT_READER_PERCENT, readerColumns, sidebarNavigationPlan } from './layout'
+import { StorageConfirmation } from './StorageConfirmation'
+import type { StorageAction } from './StorageConfirmation'
 import type { BrowserTab } from './BrowserPane'
-import { isEnglishTitle, parseStoredTimestamp, rankTrendPoints } from './presentation'
+import { parseStoredTimestamp, rankTrendPoints, shouldOfferTitleTranslation } from './presentation'
 import {
   Locale, Theme, Messages, messages,
   detectLocale, detectTheme, applyTheme,
 } from './i18n'
-import type { CollectionStatusEvent, ModelSettings, SaveSourceConfiguration, SourceConfiguration, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
+import type { CollectionStatusEvent, HiddenTopicView, ModelSettings, SaveSourceConfiguration, SourceConfiguration, SourceRegion, StorageStatus, TopicCategory, TopicPage, TopicQuery, TopicView } from './types'
 
 const PAGE_SIZE = 20
-type ViewMode = 'discover' | 'queue' | 'new' | 'settings'
+const HIDDEN_TOPICS_PAGE_SIZE = 20
+type ViewMode = SidebarView
 type SettingsTab = 'general' | 'network' | 'sources' | 'model' | 'storage'
 interface TranslationState { readonly loading?: boolean; readonly text?: string; readonly error?: string }
 interface NoticeState { readonly scope: 'workspace' | 'network' | 'sources' | 'model' | 'storage'; readonly text: string }
 interface SourceDropTarget { readonly code: string; readonly after: boolean }
 interface SourcePointerDrag { readonly code: string; readonly pointerId: number; readonly startY: number; readonly currentY: number; readonly active: boolean }
 interface FilterOption { readonly value: string; readonly label: string; readonly removable?: boolean }
-type ModelProviderId = 'deepseek' | 'openai' | 'dashscope' | 'siliconflow' | 'volcengine' | 'ollama' | 'custom'
+type ModelProviderId = 'deepseek' | 'openai' | 'dashscope' | 'siliconflow' | 'volcengine' | 'zhipu' | 'kimi' | 'anthropic' | 'bai' | 'ollama' | 'custom'
 interface ModelProviderPreset { readonly id: Exclude<ModelProviderId, 'custom'>; readonly label: string; readonly endpoint: string; readonly models: readonly string[] }
 
-/** OpenAI-compatible providers that can use the native translation client unchanged. */
+/** Translation providers supported by the native OpenAI/Anthropic protocol adapters. */
 const MODEL_PROVIDER_PRESETS: readonly ModelProviderPreset[] = [
   { id: 'deepseek', label: 'DeepSeek', endpoint: 'https://api.deepseek.com', models: ['deepseek-flash', 'deepseek-v4-pro'] },
   { id: 'openai', label: 'OpenAI', endpoint: 'https://api.openai.com/v1', models: ['gpt-5-mini', 'gpt-4.1-mini', 'gpt-4.1-nano'] },
   { id: 'dashscope', label: '阿里云百炼', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-flash', 'qwen-plus', 'qwen-turbo', 'qwen3-max'] },
   { id: 'siliconflow', label: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1', models: ['Pro/deepseek-ai/DeepSeek-V3.2', 'Pro/zai-org/GLM-5.1', 'Qwen/Qwen3-8B'] },
   { id: 'volcengine', label: '火山方舟', endpoint: 'https://ark.cn-beijing.volces.com/api/v3', models: ['doubao-seed-2-1-pro-260628', 'doubao-seed-evolving'] },
+  { id: 'zhipu', label: '智谱 AI', endpoint: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-5.2', 'glm-5-turbo', 'glm-4.7', 'glm-4.5-air'] },
+  { id: 'kimi', label: 'Kimi', endpoint: 'https://api.moonshot.ai/v1', models: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.5'] },
+  { id: 'anthropic', label: 'Anthropic Claude', endpoint: 'https://api.anthropic.com', models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-5-5'] },
+  { id: 'bai', label: 'B.AI', endpoint: 'https://api.b.ai/v1', models: ['claude-sonnet-4-6', 'gpt-5.4-mini', 'deepseek-v3.2', 'kimi-k2.5', 'glm-5.1'] },
   { id: 'ollama', label: 'Ollama（本地）', endpoint: 'http://localhost:11434/v1', models: ['qwen3:8b', 'qwen3:4b', 'llama3.2'] },
 ]
 
@@ -189,14 +199,14 @@ function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTransl
         <button className="topic-title" type="button" onClick={() => onOpen(topic)}>
           {topic.title}
         </button>
-        {isEnglishTitle(topic.title) ? (
+        {shouldOfferTitleTranslation(topic.platformCode, topic.title) ? (
           <div className="translation-row">
             <button
               className="text-button" type="button"
               disabled={translation?.loading === true || translation?.text !== undefined}
               onClick={() => void onTranslate(topic)}
             >
-              {translation?.loading === true ? m.translating : translation?.text === undefined ? m.translateBtn : m.translated}
+              {translation?.loading === true ? <><LoaderCircle className="translation-spinner" aria-hidden="true" />{m.translating}</> : translation?.text === undefined ? m.translateBtn : m.translated}
             </button>
             {translation?.text !== undefined ? <span lang="zh-CN">{translation.text}</span> : null}
             {translation?.error !== undefined ? <span className="translation-error">{translation.error}</span> : null}
@@ -205,10 +215,18 @@ function TopicCard({ topic, displayRank, translation, m, onQueueChange, onTransl
         <div className="topic-footer">
           <span>{m.firstSeen} {formatTime(topic.firstSeenAt)} · {m.consecutive} {topic.consecutiveRuns} {m.consecutiveUnit}</span>
           <RankTrend values={topic.trend} label={m.trendAccum} />
-          <button className="text-button" type="button" disabled={saving} onClick={() => void toggleQueue()}>
-            {saving ? m.saving : topic.queued ? m.queueRemove : m.queueAdd}
+          <button
+            className={`topic-action-button topic-queue-button${topic.queued ? ' active' : ''}`}
+            type="button"
+            disabled={saving}
+            aria-label={saving ? m.saving : topic.queued ? m.queueRemove : m.queueAdd}
+            aria-pressed={topic.queued}
+            title={saving ? m.saving : topic.queued ? m.queueRemove : m.queueAdd}
+            onClick={() => void toggleQueue()}
+          >
+            <Bookmark aria-hidden="true" />
           </button>
-          {onHide !== undefined ? <button className="text-button topic-hide-button" type="button" disabled={hiding} title={m.topicHide} onClick={() => void hide()}><EyeOff aria-hidden="true" />{hiding ? m.saving : m.topicHide}</button> : null}
+          {onHide !== undefined ? <button className="topic-action-button topic-hide-button" type="button" disabled={hiding} aria-label={hiding ? m.saving : m.topicHide} title={hiding ? m.saving : m.topicHide} onClick={() => void hide()}><EyeOff aria-hidden="true" /></button> : null}
         </div>
       </div>
     </article>
@@ -266,8 +284,10 @@ export function App() {
   const browserTabCounter = useRef(0)
   const topicTabIdsRef = useRef(new Map<string, string>())
   const [readerExpanded, setReaderExpanded] = useState(false)
-  const [readerWidth, setReaderWidth] = useState(60)
+  const workspaceFrame = useRef<HTMLDivElement>(null)
+  const [readerWidth, setReaderWidth] = useState(DEFAULT_READER_PERCENT)
   const [view, setView]           = useState<ViewMode>('discover')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [prevView, setPrevView]   = useState<Exclude<ViewMode, 'settings'>>('discover')
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
 
@@ -299,7 +319,12 @@ export function App() {
   const [proxyUrl,        setProxyUrl]           = useState('')
   const [savingNetwork,   setSavingNetwork]      = useState(false)
   const [storageStatus,   setStorageStatus]      = useState<StorageStatus>()
-  const [storageAction,   setStorageAction]      = useState<'backup' | 'restore' | 'optimize' | null>(null)
+  const [storageAction,   setStorageAction]      = useState<StorageAction | null>(null)
+  const [pendingStorageAction, setPendingStorageAction] = useState<StorageAction | null>(null)
+  const [hiddenTopics,    setHiddenTopics]       = useState<HiddenTopicView[]>()
+  const [hiddenTopicsSearch, setHiddenTopicsSearch] = useState('')
+  const [hiddenTopicsPage, setHiddenTopicsPage] = useState(0)
+  const [restoringHidden, setRestoringHidden]    = useState<number | 'all'>()
   const [sourceConfigs,   setSourceConfigs]      = useState<SourceConfiguration[]>([])
   const [sourceDraft,     setSourceDraft]        = useState<SaveSourceConfiguration>()
   const [editingSourceCode, setEditingSourceCode] = useState<string>()
@@ -325,6 +350,14 @@ export function App() {
     () => regionSourceConfigs.filter((sourceConfig) => category === 'all' || sourceConfig.category === category),
     [category, regionSourceConfigs],
   )
+  const filteredHiddenTopics = useMemo(() => {
+    const query = hiddenTopicsSearch.trim().toLocaleLowerCase(locale === 'zh' ? 'zh-CN' : 'en-US')
+    if (!query) return hiddenTopics ?? []
+    return (hiddenTopics ?? []).filter((topic) => `${topic.title} ${topic.platformName}`.toLocaleLowerCase(locale === 'zh' ? 'zh-CN' : 'en-US').includes(query))
+  }, [hiddenTopics, hiddenTopicsSearch, locale])
+  const hiddenTopicsTotalPages = Math.max(1, Math.ceil(filteredHiddenTopics.length / HIDDEN_TOPICS_PAGE_SIZE))
+  const visibleHiddenTopicsPage = Math.min(hiddenTopicsPage, hiddenTopicsTotalPages - 1)
+  const visibleHiddenTopics = filteredHiddenTopics.slice(visibleHiddenTopicsPage * HIDDEN_TOPICS_PAGE_SIZE, (visibleHiddenTopicsPage + 1) * HIDDEN_TOPICS_PAGE_SIZE)
 
   browserTabsRef.current = browserTabs
   activeBrowserTabIdRef.current = activeBrowserTabId
@@ -386,50 +419,48 @@ export function App() {
   const openTopic = useCallback((topic: TopicView): void => {
     const topicUrl = normalizedArticleUrl(topic.url)
     const topicKeys = [`id:${topic.id}`, `url:${topicUrl}`]
-    const newId = `tab-${++browserTabCounter.current}`
-    setBrowserTabs((currentTabs) => {
-      const mappedId = topicKeys.map((key) => topicTabIdsRef.current.get(key)).find((id) => (
-        id !== undefined && currentTabs.some((tab) => tab.id === id)
-      ))
-      const existing = currentTabs.find((tab) => tab.id === mappedId) ?? currentTabs.find((tab) => (
-        tab.topicId === topic.id
-        || (tab.sourceUrl !== undefined && normalizedArticleUrl(tab.sourceUrl) === topicUrl)
-        || (tab.url !== '' && normalizedArticleUrl(tab.url) === topicUrl)
-      ))
-      // Reuse the active unpinned blank tab created by the browser toggle. Each
-      // distinct topic otherwise owns one tab, and repeat clicks only activate it.
-      const reusable = existing === undefined
-        ? currentTabs.find((tab) => (
-            tab.id === activeBrowserTabIdRef.current
-            && tab.url === ''
-            && tab.topicId === undefined
-            && tab.sourceUrl === undefined
-            && tab.pinned !== true
-          ))
-        : undefined
-      const targetId = existing?.id ?? reusable?.id ?? newId
-      const topicTab: BrowserTab = {
-        id: targetId,
-        url: topic.url,
-        title: topic.title,
-        topicId: topic.id,
-        sourceUrl: topic.url,
-      }
-      const next = existing
-        ? currentTabs
-        : reusable
-          ? currentTabs.map((tab) => tab.id === reusable.id ? topicTab : tab)
-          : [...currentTabs, topicTab]
-      browserTabsRef.current = next
-      topicKeys.forEach((key) => topicTabIdsRef.current.set(key, targetId))
-      activeBrowserTabIdRef.current = targetId
-      setActiveBrowserTabId(targetId)
-      return next
-    })
+    const currentTabs = browserTabsRef.current
+    const mappedId = topicKeys.map((key) => topicTabIdsRef.current.get(key)).find((id) => (
+      id !== undefined && currentTabs.some((tab) => tab.id === id)
+    ))
+    const existing = currentTabs.find((tab) => tab.id === mappedId) ?? currentTabs.find((tab) => (
+      tab.topicId === topic.id
+      || (tab.sourceUrl !== undefined && normalizedArticleUrl(tab.sourceUrl) === topicUrl)
+      || (tab.url !== '' && normalizedArticleUrl(tab.url) === topicUrl)
+    ))
+    // Reuse the active unpinned blank tab created by the browser toggle. Each
+    // distinct topic otherwise owns one tab, and repeat clicks only activate it.
+    const reusable = existing === undefined
+      ? currentTabs.find((tab) => (
+          tab.id === activeBrowserTabIdRef.current
+          && tab.url === ''
+          && tab.topicId === undefined
+          && tab.sourceUrl === undefined
+          && tab.pinned !== true
+        ))
+      : undefined
+    const targetId = existing?.id ?? reusable?.id ?? `tab-${++browserTabCounter.current}`
+    const topicTab: BrowserTab = {
+      id: targetId,
+      url: topic.url,
+      title: topic.title,
+      topicId: topic.id,
+      sourceUrl: topic.url,
+    }
+    const next = existing
+      ? currentTabs
+      : reusable
+        ? currentTabs.map((tab) => tab.id === reusable.id ? topicTab : tab)
+        : [...currentTabs, topicTab]
+    // Commit both pieces of state outside a React state updater. This prevents
+    // the first click from mounting an open browser without an active tab.
+    replaceBrowserTabs(next)
+    topicKeys.forEach((key) => topicTabIdsRef.current.set(key, targetId))
+    activateBrowserTab(targetId)
     setBrowserOpen(true)
     setBrowserClosing(false)
     if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
-  }, [])
+  }, [activateBrowserTab, replaceBrowserTabs])
 
   const openXiaohongshuSession = (): void => {
     switchView(prevView)
@@ -594,6 +625,8 @@ export function App() {
     void getNetworkSettings().then((s) => setProxyUrl(s.proxyUrl ?? ''))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
     void getStorageStatus().then(setStorageStatus)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+    void listHiddenTopics().then(setHiddenTopics)
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }, [view])
 
@@ -875,8 +908,7 @@ export function App() {
     } finally { setSavingNetwork(false) }
   }
 
-  const runStorageAction = async (action: 'backup' | 'restore' | 'optimize'): Promise<void> => {
-    if (action === 'restore' && !window.confirm(m.storageRestoreConfirm)) return
+  const runStorageAction = async (action: StorageAction): Promise<void> => {
     setStorageAction(action); setError(undefined); setNotice(undefined)
     try {
       const result = action === 'backup'
@@ -890,6 +922,21 @@ export function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally { setStorageAction(null) }
+  }
+
+  const restoreHidden = async (topicId?: number): Promise<void> => {
+    const action = topicId ?? 'all'
+    setRestoringHidden(action); setError(undefined); setNotice(undefined)
+    try {
+      const remaining = topicId === undefined
+        ? await restoreAllHiddenTopics()
+        : await restoreHiddenTopic(topicId)
+      setHiddenTopics(remaining)
+      setNotice({ scope: 'storage', text: topicId === undefined ? m.storageAllTopicsRestored : m.storageTopicRestored })
+      await load(true)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally { setRestoringHidden(undefined) }
   }
 
   const switchView = (next: ViewMode): void => {
@@ -910,6 +957,21 @@ export function App() {
   }
 
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / PAGE_SIZE))
+
+  /** Restore the selected sidebar content instead of leaving it behind a full reader. */
+  const navigateSidebar = (next: ViewMode): void => {
+    const plan = sidebarNavigationPlan(next === 'settings', workspaceFrame.current?.clientWidth ?? 0,
+      window.innerWidth, CSS.supports('container-type', 'inline-size'))
+    setReaderExpanded(plan.expanded)
+    if (plan.hideBrowser) {
+      // A closing two-column animation cannot fit the narrow workspace. Hide
+      // immediately; BrowserPane cleanup hides native views, while tabs survive.
+      if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
+      setBrowserOpen(false)
+      setBrowserClosing(false)
+    }
+    switchView(next)
+  }
 
   /** Render the same editor either below the selected source row or above the list for a new source. */
   const renderSourceEditor = (): ReactNode => sourceDraft === undefined ? null : (
@@ -961,6 +1023,9 @@ export function App() {
     return (
       <div className="settings-fullscreen">
         {renderToastLayer()}
+        {pendingStorageAction !== null ? <StorageConfirmation action={pendingStorageAction} m={m}
+          onCancel={() => setPendingStorageAction(null)}
+          onConfirm={() => { setPendingStorageAction(null); void runStorageAction(pendingStorageAction) }} /> : null}
         <header className="settings-fs-header">
           <button className="back-button" type="button" onClick={() => switchView(prevView)}>
             <ArrowLeft aria-hidden="true" />{m.settingsBack}
@@ -1130,11 +1195,31 @@ export function App() {
                   ) : null}
                   <div className="settings-card-actions storage-actions">
                     <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
-                    <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
-                    <button type="button" disabled={storageAction !== null} onClick={() => void runStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
-                    <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => void runStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
+                    <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
+                    <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
+                    <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => setPendingStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
                   </div>
                   {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}
+                  <section className="hidden-topics-panel">
+                    <header>
+                      <div>
+                        <h3>{m.storageHiddenHeading}<span>{m.storageHiddenCount(hiddenTopics?.length ?? 0)}</span></h3>
+                        <p>{m.storageHiddenDesc}</p>
+                      </div>
+                      <button type="button" disabled={hiddenTopics === undefined || hiddenTopics.length === 0 || restoringHidden !== undefined} onClick={() => void restoreHidden()}><RotateCcw aria-hidden="true" />{m.storageRestoreAllTopics}</button>
+                    </header>
+                    {hiddenTopics?.length === 0 ? <div className="hidden-topics-empty">{m.storageHiddenEmpty}</div> : null}
+                    {hiddenTopics !== undefined && hiddenTopics.length > 0 ? <>
+                      <label className="hidden-topics-search"><Search aria-hidden="true" /><input value={hiddenTopicsSearch} placeholder={m.storageHiddenSearchPlaceholder} aria-label={m.storageHiddenSearchPlaceholder} onChange={(event) => { setHiddenTopicsSearch(event.target.value); setHiddenTopicsPage(0) }} />{hiddenTopicsSearch ? <button type="button" aria-label={m.storageHiddenClearSearch} title={m.storageHiddenClearSearch} onClick={() => { setHiddenTopicsSearch(''); setHiddenTopicsPage(0) }}><X aria-hidden="true" /></button> : null}</label>
+                      {filteredHiddenTopics.length === 0 ? <div className="hidden-topics-empty">{m.storageHiddenNoMatches}</div> : <div className="hidden-topics-list">
+                      {visibleHiddenTopics.map((topic) => <div className="hidden-topic-row" key={topic.id}>
+                        <div><strong title={topic.title}>{topic.title}</strong><span>{topic.platformName} · {formatTime(topic.hiddenAt)}</span></div>
+                        <button type="button" disabled={restoringHidden !== undefined} aria-label={`${m.storageRestoreTopic}: ${topic.title}`} title={m.storageRestoreTopic} onClick={() => void restoreHidden(topic.id)}><RotateCcw aria-hidden="true" />{restoringHidden === topic.id ? m.storageWorking : m.storageRestoreTopic}</button>
+                      </div>)}
+                    </div>}
+                      {filteredHiddenTopics.length > HIDDEN_TOPICS_PAGE_SIZE ? <nav className="hidden-topics-pagination" aria-label={m.storageHiddenPagination}><button type="button" disabled={visibleHiddenTopicsPage === 0} onClick={() => setHiddenTopicsPage((page) => Math.max(0, page - 1))}>{m.prev}</button><span>{visibleHiddenTopicsPage + 1} / {hiddenTopicsTotalPages}</span><button type="button" disabled={visibleHiddenTopicsPage + 1 >= hiddenTopicsTotalPages} onClick={() => setHiddenTopicsPage((page) => Math.min(hiddenTopicsTotalPages - 1, page + 1))}>{m.next}</button></nav> : null}
+                    </> : null}
+                  </section>
                 </div>
               </div>
             )}
@@ -1190,37 +1275,14 @@ export function App() {
   const viewTitle = view === 'discover' ? m.navDiscover : view === 'queue' ? m.navQueue : m.navNew
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${sidebarCollapsed ? ' sidebar-is-collapsed' : ''}`}>
       {renderToastLayer()}
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">TD</span>
-          <div>
-            <strong>Topic Desk</strong>
-            <small>STUDIO</small>
-          </div>
-        </div>
+      <Sidebar collapsed={sidebarCollapsed} view={view} m={m} version={__APP_VERSION__}
+        queuedTotal={page?.queuedTotal ?? 0} recentTotal={page?.recentTotal ?? 0}
+        onToggle={() => setSidebarCollapsed((current) => !current)} onNavigate={navigateSidebar} />
 
-        <nav aria-label={m.navSettings}>
-          <button className={view === 'discover' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('discover')}>
-            <Compass aria-hidden="true" />{m.navDiscover}
-          </button>
-          <button className={view === 'queue' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('queue')}>
-            <Bookmark aria-hidden="true" />{m.navQueue} <small>{page?.queuedTotal ?? 0}</small>
-          </button>
-          <button className={view === 'new' ? 'nav-item active' : 'nav-item'} onClick={() => switchView('new')}>
-            <Sparkles aria-hidden="true" />{m.navNew} <small>{page?.recentTotal ?? 0}</small>
-          </button>
-        </nav>
-
-        <div className="sidebar-footer">
-          <button className="nav-item" onClick={() => switchView('settings')}>
-            <Settings aria-hidden="true" />{m.navSettings}
-          </button>
-        </div>
-      </aside>
-
-      <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) && !readerExpanded ? `minmax(320px, ${100 - readerWidth}fr) minmax(0, ${readerWidth}fr)` : undefined }}>
+      <div className="workspace-frame" ref={workspaceFrame}>
+      <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) && !readerExpanded ? readerColumns(readerWidth) : undefined }}>
       <main className="topic-list-pane">
         <header className="topbar">
           <div className="topbar-main">
@@ -1314,6 +1376,7 @@ export function App() {
         onCollectXiaohongshu={collectXiaohongshu}
         onClose={closeBrowser}
         onResize={setReaderWidth} /> : null}
+      </div>
       </div>
     </div>
   )

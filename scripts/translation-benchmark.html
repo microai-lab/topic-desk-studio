@@ -1,0 +1,69 @@
+<!doctype html>
+<!-- Local, network-free browser benchmark. Serve with Vite and open this file's URL. -->
+<meta charset="utf-8">
+<title>Reader text extraction benchmark</title>
+<style>body{margin:0;font:16px/1.5 sans-serif}p{margin:0;min-height:40px}.topic-desk-translation{display:block}</style>
+<main id="article"></main><pre id="result"></pre>
+<script type="module">
+import runtime from '../src-tauri/src/page_translation.js?raw';
+// Frozen pre-optimization collector for a repeatable same-DOM comparison.
+function baseline() {
+  const seen = new WeakMap();
+  return () => {
+    const groups = new Map(), texts = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      let owner = node.parentElement;
+      if (!owner || owner.closest('script,style,noscript,textarea,input,select,option,code,pre,svg,canvas,[aria-hidden="true"],[translate="no"],[contenteditable="true"],.topic-desk-translation') || !node.textContent.trim()) continue;
+      while (owner.parentElement && getComputedStyle(owner).display === 'inline') owner = owner.parentElement;
+      const r = owner.getBoundingClientRect(), style = getComputedStyle(owner);
+      if (!(owner.isConnected && r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0')) continue;
+      groups.set(owner, (groups.get(owner) || '') + node.textContent);
+    }
+    for (const [element, raw] of groups) {
+      const text = raw.replace(/\s+/g, ' ').trim();
+      if (!text || seen.get(element) === text) continue;
+      if (texts.length >= 24) break;
+      seen.set(element, text);
+      const chars = Array.from(text);
+      for (let i = 0; i < chars.length; i += 900) {
+        const part = chars.slice(i, i + 900).join('');
+        const slot = document.createElement('span'); slot.className = 'topic-desk-translation';
+        element.appendChild(slot); texts.push(part);
+      }
+    }
+    return texts;
+  };
+}
+const article = document.querySelector('#article');
+const fragment = document.createDocumentFragment();
+for (let i = 0; i < 4000; i++) {
+  const paragraph = document.createElement('p');
+  for (let j = 0; j < 5; j++) {
+    const span = document.createElement('span'); span.textContent = `Paragraph ${i} fragment ${j}. `;
+    paragraph.appendChild(span);
+  }
+  fragment.appendChild(paragraph);
+}
+article.appendChild(fragment);
+const run = new Function(`return (${runtime})('benchmark')`);
+const measure = action => { const start = performance.now(); action(); return performance.now() - start; };
+const rows = [];
+for (let i = 0; i < 5; i++) {
+  document.body.getBoundingClientRect();
+  const collect = baseline();
+  const oldInitial = measure(collect);
+  const oldIdle = measure(() => { for (let j = 0; j < 100; j++) collect(); });
+  document.querySelectorAll('.topic-desk-translation').forEach(n => n.remove());
+  document.body.getBoundingClientRect();
+  const initial = measure(run);
+  const state = globalThis.__topicDeskPageTranslation;
+  const idle = measure(() => { for (let j = 0; j < 100; j++) state.collect(); });
+  state.stop();
+  rows.push({ oldInitial, initial, oldIdle, idle });
+}
+const median = key => rows.map(r => r[key]).sort((a,b) => a-b)[2];
+article.remove();
+document.querySelector('#result').textContent = JSON.stringify({ browser: navigator.userAgent, fixture: '4000 paragraphs / 20000 text nodes; no model/network', medianMs: Object.fromEntries(['oldInitial','initial','oldIdle','idle'].map(k=>[k,median(k)])), runs: rows });
+document.title = 'BENCHMARK COMPLETE';
+</script>

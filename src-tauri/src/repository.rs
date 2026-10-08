@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, ToSql};
 
-use crate::catalog::{default_category, default_proxy_mode, default_region, PLATFORM_CATALOG};
+use crate::catalog::{
+    default_category, default_proxy_mode, default_region, google_trends_topic_url, PLATFORM_CATALOG,
+};
 use crate::credential_cipher::{EncryptedCredential, ALGORITHM};
 use crate::error::{AppError, AppResult};
 use crate::identity::identify_topic;
 use crate::models::{
-    CollectionStats, ModelSettings, NetworkSettings, ParsedFeed, PlatformSource,
+    CollectionStats, HiddenTopicView, ModelSettings, NetworkSettings, ParsedFeed, PlatformSource,
     PlatformStatusView, SaveSourceConfiguration, SourceConfiguration, SourceParserType,
     SourceProxyMode, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
     UiLocale, UiPreferences, UiTheme,
@@ -102,6 +104,43 @@ impl<'connection> TopicRepository<'connection> {
     /// Construct a repository without taking ownership of the SQLite connection.
     pub fn new(connection: &'connection Connection) -> Self {
         Self { connection }
+    }
+
+    /// Repair links created by the generic RSS parser before Google Trends got
+    /// its per-topic Explore URL mapping. This narrow repair is the exception to
+    /// preserving first-seen URLs because the stored value is an XML endpoint,
+    /// not a topic page.
+    pub fn repair_legacy_google_trends_urls(&self) -> AppResult<usize> {
+        let rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT t.id, p.code, t.title
+                 FROM topic t JOIN platform p ON p.id = t.platform_id
+                 WHERE p.code IN ('google-trends-zh', 'google-trends-global')
+                   AND t.canonical_url LIKE 'https://trends.google.com/trending/rss?%'",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut repaired = 0;
+        for (id, code, title) in rows {
+            if let Some(url) = google_trends_topic_url(&code, &title) {
+                repaired += transaction.execute(
+                    "UPDATE topic SET canonical_url = ?, update_time = datetime('now', 'localtime') WHERE id = ?",
+                    params![url, id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(repaired)
     }
 
     /// Return one validated, paginated view of current topics and platform health.
@@ -350,6 +389,51 @@ impl<'connection> TopicRepository<'connection> {
             [topic_id],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// List soft-hidden identities for explicit recovery in local-data settings.
+    pub fn hidden_topics(&self) -> AppResult<Vec<HiddenTopicView>> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.id, t.title, p.display_name, t.update_time
+             FROM topic t JOIN platform p ON p.id = t.platform_id
+             WHERE t.deleted != 0
+             ORDER BY t.update_time DESC, t.id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(HiddenTopicView {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                platform_name: row.get(2)?,
+                hidden_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Restore one hidden topic without changing its creation-queue state.
+    pub fn restore_hidden_topic(&self, topic_id: i64) -> AppResult<()> {
+        if topic_id <= 0 {
+            return Err(AppError::InvalidInput("topicId 必须是正整数".into()));
+        }
+        let changed = self.connection.execute(
+            "UPDATE topic SET deleted = 0, update_time = datetime('now', 'localtime')
+             WHERE id = ? AND deleted != 0",
+            [topic_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::InvalidInput("隐藏话题不存在或已恢复".into()));
+        }
+        Ok(())
+    }
+
+    /// Restore every hidden topic while leaving historical queue removals untouched.
+    pub fn restore_all_hidden_topics(&self) -> AppResult<()> {
+        self.connection.execute(
+            "UPDATE topic SET deleted = 0, update_time = datetime('now', 'localtime')
+             WHERE deleted != 0",
+            [],
+        )?;
         Ok(())
     }
 
@@ -1366,6 +1450,12 @@ mod tests {
             .expect("first feed should insert");
         let topic_id = first.inserted_topic_ids[0];
         repository.hide_topic(topic_id).expect("topic should hide");
+        let hidden = repository
+            .hidden_topics()
+            .expect("hidden topics should load");
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].id, topic_id);
+        assert_eq!(hidden[0].title, "不再感兴趣的话题");
 
         let second_run = repository.create_run(platform.id, "test").unwrap();
         let second = repository
@@ -1382,6 +1472,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(observations, 1);
+
+        repository
+            .restore_hidden_topic(topic_id)
+            .expect("topic should be restored");
+        assert!(repository.hidden_topics().unwrap().is_empty());
+
+        let third_run = repository.create_run(platform.id, "test").unwrap();
+        let third = repository
+            .commit_feed(&platform, third_run, &feed)
+            .expect("restored identity should be collected again");
+        assert_eq!((third.inserted, third.updated), (0, 1));
+        assert_eq!(repository.list(&TopicQuery::default()).unwrap().total, 1);
+
+        repository
+            .hide_topic(topic_id)
+            .expect("topic should hide again");
+        repository
+            .restore_all_hidden_topics()
+            .expect("all hidden topics should be restored");
+        assert!(repository.hidden_topics().unwrap().is_empty());
+        assert_eq!(repository.list(&TopicQuery::default()).unwrap().total, 1);
     }
 
     /// A fourth non-empty collection batch evicts only the oldest recent-addition batch.

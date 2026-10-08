@@ -5,6 +5,16 @@ export function isEnglishTitle(title: string): boolean {
   return /[A-Za-z]/.test(title) && !/[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u.test(title)
 }
 
+/** Avoid spending model calls on repository/model identifiers and asset symbols. */
+export function shouldOfferTitleTranslation(platformCode: string, title: string): boolean {
+  if (!isEnglishTitle(title)) return false
+  if (platformCode === 'coingecko') return false
+  if (['github', 'hugging-face'].includes(platformCode) && /^[^\s/]+\/[^\s/]+$/.test(title.trim())) {
+    return false
+  }
+  return true
+}
+
 /** Convert rank history into SVG points where a smaller rank appears visually higher. */
 export function rankTrendPoints(values: readonly number[]): string {
   const minimum = Math.min(...values)

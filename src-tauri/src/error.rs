@@ -19,7 +19,22 @@ pub enum AppError {
     Initialization(String),
     #[error("采集失败：{0}")]
     Collection(String),
+    #[error("翻译失败：{0}")]
+    Translation(String),
 }
 
 /// Tauri commands serialize errors as strings without exposing internal backtraces.
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translation_errors_are_not_reported_as_collection_failures() {
+        assert_eq!(
+            AppError::Translation("模型没有返回文本译文".into()).to_string(),
+            "翻译失败：模型没有返回文本译文"
+        );
+    }
+}

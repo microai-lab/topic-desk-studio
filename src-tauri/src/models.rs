@@ -335,6 +335,16 @@ pub struct StorageStatus {
     pub latest_backup: Option<String>,
 }
 
+/// One soft-hidden topic exposed only in the local-data recovery panel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenTopicView {
+    pub id: i64,
+    pub title: String,
+    pub platform_name: String,
+    pub hidden_at: String,
+}
+
 /// Result of an explicit native backup or restore operation.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

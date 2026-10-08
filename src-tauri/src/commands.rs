@@ -16,10 +16,10 @@ use crate::collector;
 use crate::credential_cipher::{CredentialCipher, MASTER_KEY_FILE};
 use crate::error::AppError;
 use crate::models::{
-    CollectionStatusEvent, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings,
-    SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration,
-    SourceConfigurationBundle, SourceParserType, StorageOperationResult, StorageStatus, TopicPage,
-    TopicQuery, TranslationResult, UiPreferences,
+    CollectionStatusEvent, HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult,
+    SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences,
+    SourceConfiguration, SourceConfigurationBundle, SourceParserType, StorageOperationResult,
+    StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences,
 };
 use crate::repository::TopicRepository;
 use crate::translator;
@@ -420,6 +420,35 @@ pub fn get_storage_status(
         .map_err(|error| error.to_string())
 }
 
+/// Return soft-hidden topics only to the trusted local-data recovery view.
+#[tauri::command]
+pub fn list_hidden_topics(state: State<'_, AppState>) -> Result<Vec<HiddenTopicView>, String> {
+    with_repository(&state, |repository| repository.hidden_topics())
+}
+
+/// Restore one hidden identity and return the remaining recovery list.
+#[tauri::command]
+pub fn restore_hidden_topic(
+    state: State<'_, AppState>,
+    topic_id: i64,
+) -> Result<Vec<HiddenTopicView>, String> {
+    with_repository(&state, |repository| {
+        repository.restore_hidden_topic(topic_id)?;
+        repository.hidden_topics()
+    })
+}
+
+/// Restore all hidden identities and return an empty recovery list.
+#[tauri::command]
+pub fn restore_all_hidden_topics(
+    state: State<'_, AppState>,
+) -> Result<Vec<HiddenTopicView>, String> {
+    with_repository(&state, |repository| {
+        repository.restore_all_hidden_topics()?;
+        repository.hidden_topics()
+    })
+}
+
 /// Create a consistent application-managed snapshot of both local databases.
 #[tauri::command]
 pub fn backup_storage(
@@ -573,16 +602,18 @@ pub async fn translate_topic(
     if topic_id <= 0 {
         return Err("topicId 必须是正整数".into());
     }
-    let (title, settings, encrypted_api_key) = with_repository(&state, |repository| {
-        let title = repository
-            .topic_title(topic_id)?
-            .ok_or_else(|| AppError::InvalidInput("话题不存在或已失效".into()))?;
-        Ok((
-            title,
-            repository.model_settings()?,
-            repository.encrypted_api_key()?,
-        ))
-    })?;
+    let (title, settings, encrypted_api_key, network_settings) =
+        with_repository(&state, |repository| {
+            let title = repository
+                .topic_title(topic_id)?
+                .ok_or_else(|| AppError::InvalidInput("话题不存在或已失效".into()))?;
+            Ok((
+                title,
+                repository.model_settings()?,
+                repository.encrypted_api_key()?,
+                repository.network_settings()?,
+            ))
+        })?;
     let api_key = encrypted_api_key
         .map(|encrypted| {
             CredentialCipher::load_existing(&state.database_path.with_file_name(MASTER_KEY_FILE))?
@@ -592,7 +623,13 @@ pub async fn translate_topic(
         .transpose()
         .map_err(|error: AppError| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        translator::translate_title(topic_id, &title, &settings, api_key)
+        translator::translate_title(
+            topic_id,
+            &title,
+            &settings,
+            api_key,
+            network_settings.proxy_url.as_deref(),
+        )
     })
     .await
     .map_err(|error| format!("翻译任务异常结束：{error}"))?

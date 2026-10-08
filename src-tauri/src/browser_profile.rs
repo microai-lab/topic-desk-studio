@@ -33,13 +33,21 @@ pub struct BrowserSettings {
     pub search_engine: String,
     pub zoom: f64,
     pub remember_history: bool,
+    #[serde(default = "default_translation_language")]
+    pub translation_language: String,
 }
+
+fn default_translation_language() -> String {
+    "auto".into()
+}
+
 impl Default for BrowserSettings {
     fn default() -> Self {
         Self {
             search_engine: "bing".into(),
             zoom: 1.0,
             remember_history: true,
+            translation_language: default_translation_language(),
         }
     }
 }
@@ -62,6 +70,8 @@ pub struct BrowserLibrary {
     pub history: Vec<BrowserRecord>,
     pub downloads: Vec<BrowserRecord>,
     pub settings: BrowserSettings,
+    /// Only platforms with a native cancellable download handle expose the control.
+    pub download_cancellation: bool,
 }
 
 /// Runtime state and browser metadata share short mutex-protected transactions.
@@ -84,6 +94,22 @@ pub struct BrowserTabSession {
     pub trail: Vec<String>,
     pub index: usize,
     pub traversal: bool,
+    /// Discard readiness probes from older navigations, including same-URL reloads.
+    pub load_generation: u64,
+    pub document_origin: Option<f64>,
+}
+
+impl BrowserTabSession {
+    /// Idempotent completion also remembers the document identity for reload probes.
+    fn complete_page(&mut self, url: &str, generation: Option<u64>, origin: Option<f64>) -> bool {
+        if self.status.url != url || generation.is_some_and(|value| value != self.load_generation) {
+            return false;
+        }
+        if let Some(origin) = origin {
+            self.document_origin = Some(origin);
+        }
+        std::mem::replace(&mut self.status.loading, false)
+    }
 }
 
 /// Use one browser database in the application data directory, never in the repository.
@@ -132,6 +158,16 @@ pub fn open(path: PathBuf) -> Result<BrowserProfile, String> {
         ))),
     }
     .map_err(|e| e.to_string())?;
+    // A process exit interrupts native downloads without a final callback.
+    // Convert those stale rows once so the UI never shows an endless transfer.
+    database
+        .execute(
+            "UPDATE records
+             SET detail='failed' || substr(detail, length('downloading') + 1)
+             WHERE kind='download' AND detail LIKE 'downloading\n%'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     prune_records(&database).map_err(|e| e.to_string())?;
     let settings = database
         .query_row("SELECT json FROM preferences WHERE id=1", [], |r| {
@@ -177,10 +213,10 @@ pub fn publish(app: &tauri::AppHandle, status: &BrowserStatus) {
 }
 
 /// Reflect top-level native navigation, including redirects and links clicked in-page.
-pub fn navigated(app: &tauri::AppHandle, tab_id: &str, url: &str) {
+pub fn navigated(app: &tauri::AppHandle, tab_id: &str, url: &str) -> Option<(u64, Option<f64>)> {
     let profile = app.state::<BrowserProfile>();
     let Ok(mut session) = profile.inner.lock() else {
-        return;
+        return None;
     };
     let tab = session.tabs.entry(tab_id.into()).or_default();
     tab.status.tab_id = tab_id.into();
@@ -200,13 +236,31 @@ pub fn navigated(app: &tauri::AppHandle, tab_id: &str, url: &str) {
     tab.status.url = url.into();
     tab.status.title.clear();
     tab.status.loading = true;
+    tab.load_generation = tab.load_generation.wrapping_add(1);
     tab.status.can_back = tab.index > 0;
     tab.status.can_forward = tab.index + 1 < tab.trail.len();
     publish(app, &tab.status);
+    Some((tab.load_generation, tab.document_origin))
 }
 
 /// Persist a successful page visit, limiting retained history to 2,000 entries.
 pub fn page_finished(app: &tauri::AppHandle, tab_id: &str, url: &str) {
+    finish_page(app, tab_id, url, None, None);
+}
+
+/// Main document readiness may finish the chrome before slow subresources.
+pub fn page_ready(app: &tauri::AppHandle, tab_id: &str, url: &str, generation: u64, origin: f64) {
+    finish_page(app, tab_id, url, Some(generation), Some(origin));
+}
+
+/// Complete each navigation once; stale callbacks must not affect a new load.
+fn finish_page(
+    app: &tauri::AppHandle,
+    tab_id: &str,
+    url: &str,
+    generation: Option<u64>,
+    origin: Option<f64>,
+) {
     let profile = app.state::<BrowserProfile>();
     let Ok(mut session) = profile.inner.lock() else {
         return;
@@ -215,10 +269,9 @@ pub fn page_finished(app: &tauri::AppHandle, tab_id: &str, url: &str) {
     let Some(tab) = session.tabs.get_mut(tab_id) else {
         return;
     };
-    if tab.status.url != url {
+    if !tab.complete_page(url, generation, origin) {
         return;
     }
-    tab.status.loading = false;
     let status = tab.status.clone();
     if remember_history {
         let title = status.title.clone();
@@ -278,6 +331,7 @@ pub fn library(app: &tauri::AppHandle) -> Result<BrowserLibrary, String> {
         history: read("history")?,
         downloads: read("download")?,
         settings: session.settings.clone(),
+        download_cancellation: cfg!(target_os = "macos"),
     })
 }
 
@@ -336,9 +390,93 @@ pub fn record_download(app: &tauri::AppHandle, url: &str, path: &std::path::Path
     let _ = app.emit_to(EventTarget::webview("main"), "browser-library-changed", ());
 }
 
+/// Insert a native download before transfer starts so browser chrome can show it immediately.
+pub fn start_download(
+    app: &tauri::AppHandle,
+    url: &str,
+    path: &std::path::Path,
+) -> Result<i64, String> {
+    let profile = app.state::<BrowserProfile>();
+    let session = profile.inner.lock().map_err(|e| e.to_string())?;
+    let title = path.file_name().unwrap_or_default().to_string_lossy();
+    session
+        .database
+        .execute(
+            "INSERT INTO records(kind,url,title,detail,time) VALUES('download',?1,?2,?3,?4)",
+            params![
+                url,
+                title,
+                format!("downloading\n{}", path.display()),
+                now()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    let id = session.database.last_insert_rowid();
+    let _ = prune_records(&session.database);
+    let _ = app.emit_to(EventTarget::webview("main"), "browser-library-changed", ());
+    crate::desktop::bind_current_native_download(id);
+    Ok(id)
+}
+
+/// Finish the exact row created by `start_download`, preserving its trusted native path.
+pub fn finish_download(app: &tauri::AppHandle, id: i64, path: &std::path::Path, success: bool) {
+    let cancelled = crate::desktop::download_was_cancelled(id);
+    let profile = app.state::<BrowserProfile>();
+    let Ok(session) = profile.inner.lock() else {
+        return;
+    };
+    let state = if success {
+        "complete"
+    } else if cancelled {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    let _ = session.database.execute(
+        "UPDATE records SET detail=?1 WHERE kind='download' AND id=?2",
+        params![format!("{state}\n{}", path.display()), id],
+    );
+    if cancelled {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = app.emit_to(EventTarget::webview("main"), "browser-library-changed", ());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_ready_completes_once_and_stale_reload_probes_are_ignored() {
+        let mut tab = BrowserTabSession {
+            status: BrowserStatus {
+                url: "https://example.com/article".into(),
+                loading: true,
+                title: "Article".into(),
+                ..Default::default()
+            },
+            load_generation: 2,
+            ..Default::default()
+        };
+        assert!(!tab.complete_page("https://example.com/article", Some(1), Some(100.0)));
+        assert!(tab.status.loading);
+        assert!(!tab.complete_page("https://example.com/old", Some(2), Some(100.0)));
+        assert!(tab.complete_page("https://example.com/article", Some(2), Some(200.0)));
+        assert!(!tab.status.loading);
+        assert_eq!(tab.document_origin, Some(200.0));
+        assert_eq!(tab.status.title, "Article");
+        // A later all-resources-finished callback neither restarts loading nor records another visit.
+        assert!(!tab.complete_page("https://example.com/article", None, None));
+    }
+
+    #[test]
+    fn legacy_browser_settings_default_to_automatic_page_translation() {
+        let settings: BrowserSettings =
+            serde_json::from_str(r#"{"searchEngine":"bing","zoom":1.0,"rememberHistory":true}"#)
+                .expect("legacy browser settings should remain readable");
+        assert_eq!(settings.translation_language, "auto");
+    }
+
     #[test]
     fn omnibox_preserves_urls_encodes_search_and_rejects_active_schemes() {
         assert_eq!(
@@ -357,6 +495,53 @@ mod tests {
             "https://user:secret@example.com",
         ] {
             assert!(resolve_address(value, "bing").is_err());
+        }
+    }
+
+    #[test]
+    fn pruning_bounds_history_and_downloads_independently() {
+        let database = Connection::open_in_memory().expect("in-memory database should open");
+        database
+            .execute_batch(
+                "CREATE TABLE records (
+                   id INTEGER PRIMARY KEY,
+                   kind TEXT NOT NULL,
+                   url TEXT NOT NULL,
+                   title TEXT NOT NULL,
+                   detail TEXT NOT NULL,
+                   time INTEGER NOT NULL
+                 );",
+            )
+            .expect("test schema should be valid");
+        for index in 0..=RECORD_LIMIT {
+            for kind in ["history", "download"] {
+                database
+                    .execute(
+                        "INSERT INTO records(kind,url,title,detail,time) VALUES(?1,?2,'','',?3)",
+                        params![kind, format!("https://example.com/{kind}/{index}"), index],
+                    )
+                    .expect("test record should insert");
+            }
+        }
+
+        prune_records(&database).expect("retention should succeed");
+        for kind in ["history", "download"] {
+            let count: i64 = database
+                .query_row(
+                    "SELECT count(*) FROM records WHERE kind=?1",
+                    [kind],
+                    |row| row.get(0),
+                )
+                .expect("count should be readable");
+            assert_eq!(count, RECORD_LIMIT);
+            let oldest: i64 = database
+                .query_row(
+                    "SELECT min(time) FROM records WHERE kind=?1",
+                    [kind],
+                    |row| row.get(0),
+                )
+                .expect("oldest retained row should exist");
+            assert_eq!(oldest, 1);
         }
     }
 }

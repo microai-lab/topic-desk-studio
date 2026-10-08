@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- Public, deterministic article fixture for native-reader translation and scroll-cache smoke tests. -->
+<html lang="en">
+<meta charset="utf-8">
+<title>Reader translation smoke test</title>
+<style>
+  body { margin: 24px; font: 18px/1.6 system-ui, sans-serif; color: #20232a; background: #fff; }
+  p { min-height: 180px; margin: 24px 0; border-bottom: 1px solid #ddd; }
+</style>
+<h1 translate="no">Reader translation smoke test</h1>
+<p>A desktop reader can translate the visible article first. As the reader scrolls, new paragraphs enter the queue while completed translations remain available without another model call.</p>
+<p>Independent requests allow the first translated paragraph to appear before the entire screen finishes. A bounded worker pool avoids overwhelming the provider with unnecessary connections.</p>
+<p>Text discovery should reuse a page index rather than walking the full document repeatedly. Only changed subtrees need to be inspected when the website updates its content dynamically.</p>
+<p>A translation cache must distinguish the target language and model. An incomplete response should never be treated as a completed translation, and interrupted requests must remain retryable.</p>
+<h2 translate="no">Repeated paragraphs below: completed text should reuse the cache</h2>
+<p>A desktop reader can translate the visible article first. As the reader scrolls, new paragraphs enter the queue while completed translations remain available without another model call.</p>
+<p>Independent requests allow the first translated paragraph to appear before the entire screen finishes. A bounded worker pool avoids overwhelming the provider with unnecessary connections.</p>
+<p>Text discovery should reuse a page index rather than walking the full document repeatedly. Only changed subtrees need to be inspected when the website updates its content dynamically.</p>
+<p>A translation cache must distinguish the target language and model. An incomplete response should never be treated as a completed translation, and interrupted requests must remain retryable.</p>
+</html>

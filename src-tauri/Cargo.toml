@@ -18,8 +18,9 @@ aes-gcm = { version = "0.10", features = ["zeroize"] }
 base64 = "0.22"
 encoding_rs = "0.8"
 feed-rs = "2"
+futures-util = "0.3"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "brotli", "gzip", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "brotli", "gzip", "json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 scraper = "0.27"
 serde = { version = "1", features = ["derive"] }
@@ -45,5 +46,5 @@ strip = true
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage", "NSImageRep", "NSBitmapImageRep"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSError"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKDownload", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKSnapshotConfiguration", "block2"] }
 block2 = "0.6"

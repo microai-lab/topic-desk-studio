@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import type { Locale } from './i18n'
-import type { ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
+import type { HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
 
 /** 查询本地 SQLite 中的当前话题。 */
 export async function listTopics(query: TopicQuery): Promise<TopicPage> {
@@ -124,6 +124,21 @@ export async function getStorageStatus(): Promise<StorageStatus> {
   return invoke<StorageStatus>('get_storage_status')
 }
 
+/** List topic identities hidden by the user for local recovery. */
+export async function listHiddenTopics(): Promise<HiddenTopicView[]> {
+  return invoke<HiddenTopicView[]>('list_hidden_topics')
+}
+
+/** Restore one hidden identity and return the remaining hidden topics. */
+export async function restoreHiddenTopic(topicId: number): Promise<HiddenTopicView[]> {
+  return invoke<HiddenTopicView[]>('restore_hidden_topic', { topicId })
+}
+
+/** Restore every hidden identity and return the now-empty recovery list. */
+export async function restoreAllHiddenTopics(): Promise<HiddenTopicView[]> {
+  return invoke<HiddenTopicView[]>('restore_all_hidden_topics')
+}
+
 /** Snapshot both SQLite databases and the optional credential key. */
 export async function backupStorage(): Promise<StorageOperationResult> {
   return invoke<StorageOperationResult>('backup_storage')
@@ -162,12 +177,16 @@ export function browserRequest(action: 'sync' | 'close' | 'closeAll' | 'hideAll'
 
 /** Native browser state is emitted only to the trusted main webview. */
 export interface BrowserStatus { tabId: string; url: string; title: string; loading: boolean; canBack: boolean; canForward: boolean; muted: boolean }
+/** Progress for the current on-demand native page translation session. */
+export interface BrowserTranslationProgress { tabId: string; token: string; queued: number; deferred: number; active: number; completed: number; failed: number; running: boolean }
+/** Languages supported by native page translation. */
+export type TranslationLanguage = 'auto' | 'zh-CN' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'ru'
 /** Browser preferences persisted by Rust independently of topic settings. */
-export interface BrowserSettings { searchEngine: 'bing' | 'google' | 'duckduckgo'; zoom: number; rememberHistory: boolean }
+export interface BrowserSettings { searchEngine: 'bing' | 'google' | 'duckduckgo'; zoom: number; rememberHistory: boolean; translationLanguage: TranslationLanguage }
 /** Local browser history or download metadata. */
 export interface BrowserRecord { id: number; url: string; title: string; detail: string; time: number }
 /** Complete local library for browser management panels. */
-export interface BrowserLibrary { history: BrowserRecord[]; downloads: BrowserRecord[]; settings: BrowserSettings }
+export interface BrowserLibrary { history: BrowserRecord[]; downloads: BrowserRecord[]; settings: BrowserSettings; downloadCancellation: boolean }
 /** Explicit requests keep browser functionality behind a typed native boundary. */
 export type BrowserAction =
   | { kind: 'library' | 'print' | 'screenshot' }
@@ -178,11 +197,15 @@ export type BrowserAction =
   | { kind: 'settings'; settings: BrowserSettings }
   | { kind: 'clear'; history: boolean; cookies: boolean; downloads: boolean }
   | { kind: 'importCookies'; content: string }
-  | { kind: 'revealDownload'; id: number }
+  | { kind: 'revealDownload' | 'openDownload' | 'cancelDownload'; id: number }
+  | { kind: 'translatePage'; targetLanguage: string }
+  | { kind: 'restorePageTranslation' }
 
 /** Share one queue with native geometry updates so a close cannot race an overlay. */
 export function browserControl<T = unknown>(request: BrowserAction): Promise<T> {
   const next = browserQueue.then(() => invoke<T>('browser_control', { request }))
-  browserQueue = next.then(() => {}, () => {})
+  // Translation waits for preceding navigation, but its network lifetime must
+  // not block menus, downloads or subsequent tab switches.
+  if (request.kind !== 'translatePage') browserQueue = next.then(() => {}, () => {})
   return next
 }

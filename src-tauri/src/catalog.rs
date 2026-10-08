@@ -1,5 +1,7 @@
 //! Built-in source catalog shared by database initialization and collectors.
 
+use url::Url;
+
 /// Immutable metadata for one public topic source.
 #[derive(Debug, Clone, Copy)]
 pub struct PlatformDefinition {
@@ -152,3 +154,70 @@ pub const PLATFORM_CATALOG: &[PlatformDefinition] = &[
     PlatformDefinition { code: "sspai", display_name: "少数派", home_url: "https://sspai.com/", endpoint_url: "https://sspai.com/feed" },
     PlatformDefinition { code: "solidot", display_name: "Solidot", home_url: "https://www.solidot.org/", endpoint_url: "https://rss.solidot.org/index.rss" },
 ];
+
+/// Google Trends RSS points every item back to the XML feed. Build a stable,
+/// human-readable Explore page for the actual trend instead.
+pub fn google_trends_topic_url(code: &str, title: &str) -> Option<String> {
+    let geo = match code {
+        "google-trends-zh" => "TW",
+        "google-trends-global" => "US",
+        _ => return None,
+    };
+    let mut url = Url::parse("https://trends.google.com/trends/explore").ok()?;
+    url.query_pairs_mut()
+        .append_pair("geo", geo)
+        .append_pair("q", title);
+    Some(url.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn catalog_codes_and_urls_are_valid_and_unique() {
+        let mut codes = HashSet::new();
+        for platform in PLATFORM_CATALOG {
+            assert!(
+                codes.insert(platform.code),
+                "duplicate code: {}",
+                platform.code
+            );
+            assert!(!platform.display_name.trim().is_empty());
+            for value in [platform.home_url, platform.endpoint_url] {
+                let url = Url::parse(value).expect("catalog URLs must be absolute");
+                assert!(matches!(url.scheme(), "http" | "https"));
+                assert!(url.host_str().is_some());
+            }
+            assert!(matches!(
+                default_region(platform.code),
+                "domestic" | "international"
+            ));
+            assert!(matches!(
+                default_category(platform.code),
+                "general" | "technology" | "finance" | "developer"
+            ));
+            assert!(matches!(
+                default_proxy_mode(platform.code),
+                "direct" | "proxy"
+            ));
+        }
+        for retired in RETIRED_PLATFORM_CODES {
+            assert!(
+                !codes.contains(retired),
+                "retired sources must not remain active"
+            );
+        }
+    }
+
+    #[test]
+    fn google_trends_topics_open_html_explore_pages() {
+        let url = google_trends_topic_url("google-trends-global", "sa vs aus")
+            .expect("Google Trends source should be recognized");
+        assert!(url.starts_with("https://trends.google.com/trends/explore?"));
+        assert!(url.contains("geo=US"));
+        assert!(url.contains("q=sa+vs+aus"));
+        assert!(!url.contains("/trending/rss"));
+    }
+}
