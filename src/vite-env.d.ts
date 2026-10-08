@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-/** Build-time brand label; Git metadata is resolved only by Vite, never in the WebView. */
+/** Build-time brand label; only the configured release version reaches the WebView. */
 declare const __APP_VERSION__: string
 
 // Vite injects these ambient client types and constants at build time.

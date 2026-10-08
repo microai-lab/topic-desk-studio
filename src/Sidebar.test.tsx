@@ -29,7 +29,7 @@ describe('Sidebar', () => {
     for (const collapsed of [false, true]) {
       const m = messages.zh
       const html = renderToStaticMarkup(<Sidebar collapsed={collapsed} view="discover" queuedTotal={0} recentTotal={0}
-        version="v0.2.3" m={m} onToggle={vi.fn()} onNavigate={vi.fn()} />)
+        version="v0.3.0" m={m} onToggle={vi.fn()} onNavigate={vi.fn()} />)
       const footer = html.slice(html.indexOf('class="sidebar-footer"'))
       expect(footer.indexOf(`aria-label="${m.navSettings}"`)).toBeLessThan(footer.indexOf('class="nav-item sidebar-toggle"'))
     }
@@ -39,7 +39,7 @@ describe('Sidebar', () => {
       it(`preserves localized navigation and counts with collapsed=${collapsed} in ${locale}`, () => {
         const m = messages[locale]
         const html = renderToStaticMarkup(<Sidebar collapsed={collapsed} view="new" queuedTotal={0} recentTotal={151}
-          version="v0.2.4-beta.20261008" m={m} onToggle={vi.fn()} onNavigate={vi.fn()} />)
+          version="v0.3.0" m={m} onToggle={vi.fn()} onNavigate={vi.fn()} />)
         for (const label of [m.navDiscover, m.navQueue, m.navNew, m.navSettings]) expect(html).toContain(`aria-label="${label}"`)
         expect(html).toContain(`title="${m.navNew} (151)"`)
         expect(html).toContain(`title="${m.navQueue} (0)"`)
@@ -51,7 +51,7 @@ describe('Sidebar', () => {
           expect(html).not.toContain('class="nav-label"')
           expect(html).not.toContain('<small>')
           expect(html).not.toContain('class="brand-title"')
-          expect(html).toContain('Topic Desk STUDIO · v0.2.4-beta.20261008')
+          expect(html).toContain('Topic Desk STUDIO · v0.3.0')
         } else {
           expect(html).toContain('<small>0</small>')
           expect(html).toContain('<small>151</small>')
@@ -67,7 +67,7 @@ describe('Sidebar', () => {
     for (const state of [false, true]) {
       expect(collapsed).toBe(state)
       const controls = buttons(Sidebar({ collapsed, view: 'discover', queuedTotal: 0, recentTotal: 0,
-        version: 'v0.2.3', m: messages.zh, onToggle: toggle, onNavigate: navigate }))
+        version: 'v0.3.0', m: messages.zh, onToggle: toggle, onNavigate: navigate }))
       controls.find((button) => button['aria-label'] === (state ? messages.zh.sidebarExpand : messages.zh.sidebarCollapse))!.onClick()
       expect(navigate).not.toHaveBeenCalled()
       for (const label of [messages.zh.navDiscover, messages.zh.navQueue, messages.zh.navNew, messages.zh.navSettings]) {
@@ -80,7 +80,7 @@ describe('Sidebar', () => {
     expect(toggle).toHaveBeenCalledTimes(2)
   })
   it('escapes labels and retains only one current destination', () => {
-    const html = renderToStaticMarkup(<Sidebar collapsed view="queue" queuedTotal={0} recentTotal={0} version="v0.2.3"
+    const html = renderToStaticMarkup(<Sidebar collapsed view="queue" queuedTotal={0} recentTotal={0} version="v0.3.0"
       m={{ ...messages.zh, navQueue: '<script>' }} onToggle={vi.fn()} onNavigate={vi.fn()} />)
     expect(html).toContain('&lt;script&gt;')
     expect(html).not.toContain('<script>')
