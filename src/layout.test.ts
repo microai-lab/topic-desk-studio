@@ -1,21 +1,29 @@
 /** Laptop-size regression rules: bounded split panes, responsive CSS, and native defaults. */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { clampReaderWidth, DEFAULT_READER_PERCENT, readerColumns, readerDragWidth, READER_PANE_MIN_WIDTH, sidebarNavigationPlan, SPLIT_WORKSPACE_MIN_WIDTH, TOPIC_PANE_MIN_WIDTH } from './layout'
+import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, topicDragWidth, READER_PANE_MIN_WIDTH, sidebarNavigationPlan, SPLIT_WORKSPACE_MIN_WIDTH, TOPIC_PANE_MIN_WIDTH } from './layout'
 
 describe('reader sizing', () => {
   it('ignores stale capture, released buttons and invalid geometry after idle', () => {
-    expect(readerDragWidth(7, 7, 1, 400, 1000, 1000)).toBe(60)
-    expect(readerDragWidth(7, 7, 1, -100, 1000, 1000)).toBe(70)
-    expect(readerDragWidth(7, 7, 1, 900, 1000, 1000)).toBe(35)
+    expect(topicDragWidth(7, 7, 1, 500, 100, 1000)).toBe(400)
+    expect(topicDragWidth(7, 7, 1, -100, 100, 1000)).toBe(320)
+    expect(topicDragWidth(7, 7, 1, 900, 100, 1000)).toBe(580)
     for (const [active, pointer, buttons] of [[null, 7, 1], [7, 8, 1], [7, 7, 0], [7, 7, 2]]) {
-      expect(readerDragWidth(active!, pointer!, buttons!, 400, 1000, 1000)).toBeUndefined()
+      expect(topicDragWidth(active!, pointer!, buttons!, 400, 1000, 1000)).toBeUndefined()
     }
     for (const width of [0, -1, NaN, Infinity]) {
-      expect(readerDragWidth(7, 7, 1, 400, 1000, width)).toBeUndefined()
+      expect(topicDragWidth(7, 7, 1, 400, 1000, width)).toBeUndefined()
     }
-    expect(readerDragWidth(7, 7, 1, NaN, 1000, 1000)).toBeUndefined()
-    expect(readerDragWidth(7, 7, 1, 400, Infinity, 1000)).toBeUndefined()
+    expect(topicDragWidth(7, 7, 1, NaN, 1000, 1000)).toBeUndefined()
+    expect(topicDragWidth(7, 7, 1, 400, Infinity, 1000)).toBeUndefined()
+  })
+  it('keeps a single pane toggle in the reader instead of duplicating it in the list header', () => {
+    const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8')
+    const browser = readFileSync(new URL('./BrowserPane.tsx', import.meta.url), 'utf8')
+    expect(app).not.toContain('<ReaderExpandButton')
+    expect(browser.match(/<ReaderExpandButton/g)).toHaveLength(1)
+    expect(app).toContain('.browser-tabbar [data-topic-toggle="collapse"]')
+    expect(app).not.toContain('.topic-list-pane [data-topic-toggle="collapse"]')
   })
   it('shows source before category in the topic filters', () => {
     const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8')
@@ -23,18 +31,48 @@ describe('reader sizing', () => {
     expect([...filters.matchAll(/<FilterDropdown label=\{m\.(filter\w+)\}/g)].map(match => match[1]))
       .toEqual(['filterRegion', 'filterSource', 'filterCategory', 'filterSort'])
   })
-  it('preserves valid proportions and clamps pointer/keyboard extremes', () => {
-    for (const [input, expected] of [[0, 35], [34, 35], [35, 35], [60, 60], [70, 70], [100, 70], [-1, 35]]) {
-      expect(clampReaderWidth(input!)).toBe(expected)
+  it('starts with a fixed 420px topic pane as the workspace grows', () => {
+    expect(DEFAULT_TOPIC_WIDTH).toBe(420)
+    for (const width of [840, 1060, 1600, 2400]) {
+      expect(clampTopicWidth(DEFAULT_TOPIC_WIDTH, width)).toBe(420)
+      expect(topicColumns(DEFAULT_TOPIC_WIDTH, width)).toBe('minmax(0px, 420px) minmax(420px, 1fr)')
     }
-    expect(readerColumns(60)).toBe('minmax(320px, 40fr) minmax(420px, 60fr)')
-    expect(readerColumns(100)).toBe('minmax(320px, 30fr) minmax(420px, 70fr)')
   })
-  it('recovers invalid geometry without NaN or Infinity styles', () => {
-    for (const input of [NaN, Infinity, -Infinity]) {
-      expect(clampReaderWidth(input)).toBe(DEFAULT_READER_PERCENT)
-      expect(readerColumns(input)).toBe(readerColumns(DEFAULT_READER_PERCENT))
+  it('permits free resizing between the two content minima', () => {
+    expect(clampTopicWidth(100, 1400)).toBe(320)
+    expect(clampTopicWidth(800, 1400)).toBe(800)
+    expect(clampTopicWidth(1400, 1400)).toBe(980)
+    expect(clampTopicWidth(420 - 24, 1000)).toBe(396)
+    expect(clampTopicWidth(420 + 24, 1000)).toBe(444)
+  })
+  it('temporarily fits narrow workspaces without losing the requested width', () => {
+    expect(clampTopicWidth(420, 780)).toBe(360)
+    expect(clampTopicWidth(420, 840)).toBe(420)
+    expect(clampTopicWidth(600, 800)).toBe(380)
+    expect(clampTopicWidth(600, 1200)).toBe(600)
+    expect(clampTopicWidth(420, 500)).toBe(TOPIC_PANE_MIN_WIDTH)
+  })
+  it('collapses only the topic track and restores the selected pixel width', () => {
+    for (const width of [320, 420, 600, NaN, Infinity]) {
+      expect(topicColumns(width, 1100, true)).toBe('minmax(0px, 0px) minmax(420px, 1fr)')
+      expect(topicColumns(width, 1100, false)).toBe(topicColumns(width, 1100))
     }
+  })
+  it('animates matching tracks without removing the list and respects reduced motion', () => {
+    const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
+    expect(styles).not.toContain('.reader-expanded .topic-list-pane { display: none; }')
+    expect(styles).toContain('transition: opacity 120ms ease, visibility 0s 120ms')
+    const reduced = styles.slice(styles.indexOf('@media (prefers-reduced-motion: reduce)'))
+    expect(reduced).toContain('.topic-list-pane')
+    expect(reduced).toContain('transition: none')
+  })
+  it('recovers invalid sizing without NaN or Infinity CSS', () => {
+    for (const input of [NaN, Infinity, -Infinity]) {
+      expect(clampTopicWidth(input, 1200)).toBe(DEFAULT_TOPIC_WIDTH)
+      expect(topicColumns(input, 1200)).toBe(topicColumns(DEFAULT_TOPIC_WIDTH, 1200))
+      expect(clampTopicWidth(420, input)).toBe(DEFAULT_TOPIC_WIDTH)
+    }
+    expect(clampTopicWidth(420, 0)).toBe(DEFAULT_TOPIC_WIDTH)
   })
   it('fits a 1280-wide laptop and uses available workspace instead of the global viewport', () => {
     const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
@@ -90,6 +128,15 @@ describe('laptop presentation', () => {
     expect(styles).toContain('.workspace-frame { height: calc(100dvh - var(--shell-header-height)); }')
     expect(styles).toContain('.desk-workspace { height: calc(100vh - var(--shell-header-height)); }')
     expect(styles).not.toContain('height: calc(100vh - 57px)')
+  })
+  it('centers search input text without scaling glyphs or overlapping the icon', () => {
+    const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
+    const rule = styles.match(/\.topbar-search input\s*\{([^}]+)\}/)?.[1]
+    expect(rule).toContain('appearance: none')
+    expect(rule).toContain('line-height: calc(var(--shell-control-size) - 2px)')
+    expect(rule).toContain('padding: 0 11px 0 calc(var(--shell-control-size) + 2px)')
+    expect(rule).not.toContain('scaleX')
+    expect(styles).toContain('.topbar-search input::placeholder')
   })
   it('uses compact, equal-size controls without crowding the header content', () => {
     const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')

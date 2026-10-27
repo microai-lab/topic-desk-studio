@@ -1,5 +1,5 @@
 /** Topic Desk Studio — main UI component. */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Database, Download, EyeOff, FolderOpen, GripVertical, HardDrive, LoaderCircle, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
@@ -16,7 +16,7 @@ import { DEFAULT_PROXY_URL } from './networkPresentation'
 import { BrowserPane } from './BrowserPane'
 import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
-import { DEFAULT_READER_PERCENT, readerColumns, sidebarNavigationPlan } from './layout'
+import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, sidebarNavigationPlan } from './layout'
 import { StorageConfirmation } from './StorageConfirmation'
 import type { StorageAction } from './StorageConfirmation'
 import type { BrowserTab } from './BrowserPane'
@@ -287,11 +287,24 @@ export function App() {
   const topicTabIdsRef = useRef(new Map<string, string>())
   const [readerExpanded, setReaderExpanded] = useState(false)
   const workspaceFrame = useRef<HTMLDivElement>(null)
-  const [readerWidth, setReaderWidth] = useState(DEFAULT_READER_PERCENT)
+  const [topicWidth, setTopicWidth] = useState(DEFAULT_TOPIC_WIDTH)
+  const [workspaceWidth, setWorkspaceWidth] = useState(0)
   const [view, setView]           = useState<ViewMode>('discover')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [prevView, setPrevView]   = useState<Exclude<ViewMode, 'settings'>>('discover')
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
+
+  // Measure the usable area, including sidebar changes, before painting. The
+  // saved pixel preference stays separate from temporary narrow-window clamps.
+  useLayoutEffect(() => {
+    const frame = workspaceFrame.current
+    if (!frame) return
+    const measure = () => setWorkspaceWidth(frame.clientWidth)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(frame)
+    return () => observer.disconnect()
+  }, [view === 'settings'])
 
   // ── Filter state ────────────────────────────────────────────────
   const [region,   setRegion]   = useState<'all' | SourceRegion>('all')
@@ -975,6 +988,17 @@ export function App() {
     switchView(next)
   }
 
+  /** Restore focus to a control that remains visible after the pane changes. */
+  const toggleTopicPane = (): void => {
+    const expanded = !readerExpanded
+    setReaderExpanded(expanded)
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>(expanded
+        ? '.browser-tabbar [data-topic-toggle="restore"]'
+        : '.browser-tabbar [data-topic-toggle="collapse"]')?.focus({ preventScroll: true })
+    })
+  }
+
   /** Render the same editor either below the selected source row or above the list for a new source. */
   const renderSourceEditor = (): ReactNode => sourceDraft === undefined ? null : (
     <div className="source-editor">
@@ -1274,8 +1298,8 @@ export function App() {
         onToggle={() => setSidebarCollapsed((current) => !current)} onNavigate={navigateSidebar} />
 
       <div className="workspace-frame" ref={workspaceFrame}>
-      <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) && !readerExpanded ? readerColumns(readerWidth) : undefined }}>
-      <main className="topic-list-pane">
+      <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) ? topicColumns(topicWidth, workspaceWidth, readerExpanded) : undefined }}>
+      <main id="topic-list-pane" className="topic-list-pane" aria-hidden={(browserOpen || browserClosing) && readerExpanded} inert={(browserOpen || browserClosing) && readerExpanded}>
         <header className="topbar">
           <div className="topbar-main">
             <h1>{viewTitle}</h1>
@@ -1361,13 +1385,13 @@ export function App() {
           <button disabled={pageIndex + 1 >= totalPages} onClick={() => setPageIndex((v) => v + 1)}>{m.next}</button>
         </footer>
       </main>
-      {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing}
+      {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing} topicWidth={clampTopicWidth(topicWidth, workspaceWidth)} topicMaxWidth={clampTopicWidth(Number.MAX_SAFE_INTEGER, workspaceWidth)}
         onActivate={activateBrowserTab} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
         onMoveTab={moveBrowserTab} onPinTab={pinBrowserTab}
-        onExpand={() => setReaderExpanded((value) => !value)}
+        onExpand={toggleTopicPane}
         onCollectXiaohongshu={collectXiaohongshu}
         onClose={closeBrowser}
-        onResize={setReaderWidth} /> : null}
+        onResize={setTopicWidth} /> : null}
       </div>
       </div>
     </div>

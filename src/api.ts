@@ -176,7 +176,7 @@ export function browserRequest(action: 'sync' | 'close' | 'closeAll' | 'hideAll'
 }
 
 /** Native browser state is emitted only to the trusted main webview. */
-export interface BrowserStatus { tabId: string; url: string; title: string; loading: boolean; canBack: boolean; canForward: boolean; muted: boolean }
+export interface BrowserStatus { tabId: string; url: string; title: string; loading: boolean; canBack: boolean; canForward: boolean; muted: boolean; mediaPlaying: boolean }
 /** Progress for the current on-demand native page translation session. */
 export interface BrowserTranslationProgress { tabId: string; token: string; queued: number; deferred: number; active: number; completed: number; failed: number; running: boolean }
 /** Languages supported by native page translation. */

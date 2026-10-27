@@ -24,6 +24,8 @@ pub struct BrowserStatus {
     pub can_back: bool,
     pub can_forward: bool,
     pub muted: bool,
+    /// Media activity is tracked even while its tab is hidden or muted.
+    pub media_playing: bool,
 }
 
 /// Persisted browser preferences are validated before affecting navigation or storage.
@@ -235,6 +237,7 @@ pub fn navigated(app: &tauri::AppHandle, tab_id: &str, url: &str) -> Option<(u64
     }
     tab.status.url = url.into();
     tab.status.title.clear();
+    tab.status.media_playing = false;
     tab.status.loading = true;
     tab.load_generation = tab.load_generation.wrapping_add(1);
     tab.status.can_back = tab.index > 0;

@@ -50,7 +50,8 @@ pub(crate) fn install(app: &tauri::AppHandle, directory: &Path) -> Result<(), St
     });
     Ok(())
 }
-fn report(app: &tauri::AppHandle, error: String) {
+/// Surface a deduplicated persistence error without blocking unrelated tab cleanup.
+pub(crate) fn report(app: &tauri::AppHandle, error: String) {
     if let Ok(mut last) = app.state::<BrowserLoginSessions>().last_error.lock() {
         if last.as_ref() != Some(&error) {
             let _ = app.emit_to(
@@ -182,6 +183,7 @@ pub(crate) fn clear(app: &tauri::AppHandle) -> Result<(), String> {
     // snapshot cannot read old cookies and repopulate the encrypted vault.
     for (label, view) in app.webviews() {
         if label.starts_with("article-") {
+            crate::desktop_media::stop(&view);
             view.close().map_err(|_| "无法清除网页临时会话")?;
         }
     }

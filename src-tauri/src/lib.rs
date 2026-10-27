@@ -10,6 +10,7 @@ mod credential_cipher;
 mod data_directory;
 mod database;
 mod desktop;
+mod desktop_media;
 mod desktop_sessions;
 #[cfg(target_os = "macos")]
 mod desktop_sessions_macos;
@@ -48,6 +49,7 @@ pub fn run() {
             let data_dir = data_directory::prepare(app.handle())?;
             desktop_sessions::install(app.handle(), &data_dir)?;
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
+            desktop_media::install(app.handle());
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
                 database::open_database(&database_path).map_err(|error| error.to_string())?;

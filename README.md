@@ -57,9 +57,9 @@ Built-in sources include Weibo, Zhihu, Bilibili, 36Kr, TechCrunch, The Verge, Go
 1. **Collect topics.** Open **Discover** and click **Collect**. Collection also starts after launch and refreshes about every 10 minutes while the app is running; one failing source does not stop the others.
 2. **Narrow your focus.** Search for a topic such as `OpenAI`, or filter by source and category.
 3. **Save what matters.** Click **Add to queue** to keep a topic for later, then revisit it in **Queue**.
-4. **Read the original.** Click a title to open it in the right-hand reader. Resize or expand the pane, open more tabs, or enter a URL in its address bar.
+4. **Read the original.** Click a title to open it in the right-hand reader. Resize the pane, use **Hide topics** for focused reading, or open more tabs. **Show topics** restores the list and its previous width.
 
-The reader also offers page search and download management. Open completed downloads or their folders; cancelling active downloads is supported on macOS.
+Playing tabs show a speaker icon; click it to mute or unmute that tab, including background tabs. The reader also offers page search and download management. Open completed downloads or their folders; cancelling active downloads is supported on macOS.
 
 ## Read in two languages
 

@@ -30,3 +30,11 @@ describe('proxy settings copy', () => {
     }
   })
 })
+
+/** Search is scoped to topic titles; placeholder copy must describe that scope. */
+describe('topic search copy', () => {
+  it('names the searched content in both locales', () => {
+    expect(messages.zh.filterSearchPlaceholder).toBe('搜索选题标题')
+    expect(messages.en.filterSearchPlaceholder).toBe('Search topic titles')
+  })
+})

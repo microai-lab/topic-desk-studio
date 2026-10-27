@@ -5,10 +5,11 @@ import { ArrowDownToLine, ArrowLeft, ArrowRight, Camera, ChevronDown, ChevronUp,
 import type { LucideIcon } from 'lucide-react'
 import { browserControl, browserRequest } from './api'
 import type { BrowserLibrary, BrowserSettings, BrowserStatus, BrowserTranslationProgress } from './api'
-import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation } from './browserPresentation'
+import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
 import type { Locale } from './i18n'
-import { clampReaderWidth, readerDragWidth } from './layout'
+import { clampTopicWidth, topicDragWidth, TOPIC_PANE_MIN_WIDTH } from './layout'
 import { ReaderExpandButton } from './ReaderExpandButton'
+import { TabMediaButton } from './TabMediaButton'
 
 type Panel = 'menu' | 'history' | 'downloads' | 'downloadsAll' | 'import' | 'clear' | 'settings' | null
 type TabContextMenu = { tabId: string; x: number; y: number } | null
@@ -44,8 +45,8 @@ function Icon({ name }: { name: BrowserIconName }) {
 }
 
 /** Host a native browser while React owns the address bar, overlays and layout. */
-export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onActivate, onNewTab, onUpdateTab, onCloseTab, onMoveTab, onPinTab, onExpand, onCollectXiaohongshu, onClose, onResize }: {
-  tabs: BrowserTab[]; activeTabId: string; locale: Locale; expanded: boolean; closing?: boolean
+export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, topicWidth, topicMaxWidth, onActivate, onNewTab, onUpdateTab, onCloseTab, onMoveTab, onPinTab, onExpand, onCollectXiaohongshu, onClose, onResize }: {
+  tabs: BrowserTab[]; activeTabId: string; locale: Locale; expanded: boolean; closing?: boolean; topicWidth: number; topicMaxWidth: number
   onActivate: (id: string) => void; onNewTab: () => void
   onUpdateTab: (id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>) => void
   onCloseTab: (id: string) => void
@@ -65,6 +66,9 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   const activeTabRef = useRef(activeTabId)
   const translationTokens = useRef<Record<string, string>>({})
   const createdTabs = useRef(new Set<string>())
+  // Keep successful closes blocked until unmount so a late focus/resize callback
+  // cannot recreate their native view before React commits the tab removal.
+  const closingTabs = useRef(new Set<string>())
   const tabDrag = useRef<{ id: string; pointerId: number; startX: number; startY: number; moved: boolean } | null>(null)
   const dropTargetRef = useRef<{ id: string; after: boolean } | null>(null)
   const suppressTabClick = useRef(false)
@@ -96,7 +100,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   const zh = locale === 'zh'
   const t = (cn: string, en: string): string => zh ? cn : en
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]
-  const status = statuses[activeTabId] ?? { tabId: activeTabId, url: activeTab?.url ?? '', title: activeTab?.title ?? '', loading: false, canBack: false, canForward: false, muted: false }
+  const status = statuses[activeTabId] ?? { tabId: activeTabId, url: activeTab?.url ?? '', title: activeTab?.title ?? '', loading: false, canBack: false, canForward: false, muted: false, mediaPlaying: false }
   const pageProgress = translationProgress[activeTabId]
   const pendingTranslation = (pageProgress?.queued ?? 0) + (pageProgress?.active ?? 0)
   overlayActive.current = panel !== null || tabContextMenu !== null || closing === true
@@ -112,9 +116,10 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   }
   const openAddress = useCallback(async (input: string) => {
     const area = bounds()
-    if (!area || !input.trim() || !activeTabId) return
+    if (!area || !input.trim() || !activeTabId || closingTabs.current.has(activeTabId)) return
     setError(null); setNotice(null)
     await browserControl({ kind: 'overlay', visible: false })
+    if (closingTabs.current.has(activeTabId)) return
     setPanel(null)
     const startingStatus = { ...status, tabId: activeTabId, loading: true }
     await runBrowserNavigation(
@@ -130,7 +135,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   useEffect(() => {
     alive.current = true
     const unlisten = listen<BrowserStatus>('browser-status', ({ payload }) => {
-      if (!alive.current) return
+      if (!alive.current || closingTabs.current.has(payload.tabId)) return
       setStatuses((old) => ({ ...old, [payload.tabId]: payload }))
       if (payload.loading) {
         delete translationTokens.current[payload.tabId]
@@ -152,7 +157,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
     })
     const unpopup = listen<{ tabId: string; url: string }>('browser-open-popup', ({ payload }) => {
       const area = bounds()
-      if (alive.current && area) void browserRequest('sync', payload.tabId, area, payload.url).catch(fail)
+      if (alive.current && area && !closingTabs.current.has(payload.tabId)) void browserRequest('sync', payload.tabId, area, payload.url).catch(fail)
     })
     void refreshLibrary().catch(fail)
     return () => {
@@ -187,7 +192,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
         const area = bounds()
-        if (area && activeTabId && !document.hidden && !overlayActive.current) void browserRequest('sync', activeTabId, area).catch(fail)
+        if (area && activeTabId && !closingTabs.current.has(activeTabId) && !document.hidden && !overlayActive.current) void browserRequest('sync', activeTabId, area).catch(fail)
       })
     }
     const stopRecovery = observeReaderRecovery(window, document, sync)
@@ -216,7 +221,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   }, [activeTabId, device, deviceHeight, deviceWidth, fail, panel, tabContextMenu, closing])
 
   useEffect(() => {
-    if (!activeTab) return
+    if (!activeTab || closingTabs.current.has(activeTab.id)) return
     setAddress(activeTab.url)
     setPanel(null)
     const area = bounds()
@@ -358,12 +363,12 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   /** Close native views and React tabs together so bulk context-menu actions stay consistent. */
   const closeTabs = (ids: string[]) => {
     dismissTabContextMenu()
-    void (async () => {
-      for (const id of ids) {
-        await browserRequest('close', id).catch(fail)
-        onCloseTab(id)
-      }
-    })()
+    const pending = ids.filter((id) => !closingTabs.current.has(id))
+    for (const id of pending) closingTabs.current.add(id)
+    void runBrowserTabClose(pending, (id) => browserRequest('close', id), onCloseTab, (id, reason) => {
+      closingTabs.current.delete(id)
+      fail(reason)
+    })
   }
 
   const toggleTabMute = (tabId: string) => {
@@ -409,13 +414,14 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
   const isXiaohongshu = isXiaohongshuAddress(status.url)
 
   return <aside className={`browser-pane browser-chrome${device ? ' device-mode' : ''}${closing ? ' browser-pane-closing' : ''}`} aria-label={t('内置浏览器', 'Browser')}>
-    <div className="reader-divider" role="separator" aria-label={t('调整浏览器宽度', 'Resize browser')} aria-orientation="vertical" tabIndex={0}
+    <div className="reader-divider" role="separator" aria-label={t('调整选题宽度', 'Resize topics')} aria-orientation="vertical" aria-valuemin={TOPIC_PANE_MIN_WIDTH} aria-valuemax={Math.round(topicMaxWidth)} aria-valuenow={Math.round(topicWidth)} aria-valuetext={t(`选题 ${Math.round(topicWidth)} 像素`, `Topics ${Math.round(topicWidth)} pixels`)} tabIndex={0}
       onKeyDown={(event) => {
         const workspace = event.currentTarget.parentElement?.parentElement
         if (!workspace || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return
         event.preventDefault()
-        const width = event.currentTarget.parentElement!.getBoundingClientRect().width / workspace.getBoundingClientRect().width * 100
-        onResize(clampReaderWidth(width + (event.key === 'ArrowLeft' ? 3 : -3)))
+        const workspaceWidth = workspace.getBoundingClientRect().width
+        const width = workspaceWidth - event.currentTarget.parentElement!.getBoundingClientRect().width
+        onResize(clampTopicWidth(width + (event.key === 'ArrowLeft' ? -24 : 24), workspaceWidth))
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) return
@@ -426,7 +432,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
         if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
         const workspace = event.currentTarget.parentElement?.parentElement?.getBoundingClientRect()
         if (!workspace) return
-        const width = readerDragWidth(resizePointer.current, event.pointerId, event.buttons, event.clientX, workspace.right, workspace.width)
+        const width = topicDragWidth(resizePointer.current, event.pointerId, event.buttons, event.clientX, workspace.left, workspace.width)
         if (width !== undefined) onResize(width)
         else resizePointer.current = null
       }} onPointerUp={(event) => {
@@ -434,15 +440,17 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
       }} onPointerCancel={() => { resizePointer.current = null }} onLostPointerCapture={() => { resizePointer.current = null }} />
     <div className="browser-tabbar">
+      <ReaderExpandButton expanded={expanded} locale={locale} onToggle={onExpand} />
       <div ref={tabStrip} className="browser-tabs" role="tablist" aria-label={t('浏览器标签页', 'Browser tabs')}>
         {tabs.map((tab) => {
+          const hasMedia = statuses[tab.id]?.mediaPlaying || statuses[tab.id]?.muted
           const target = dropTarget?.id === tab.id ? (dropTarget.after ? ' drop-after' : ' drop-before') : ''
           return <div
-            className={`browser-tab${tab.id === activeTabId ? ' active' : ''}${tab.pinned ? ' pinned' : ''}${draggingTabId === tab.id ? ' dragging' : ''}${target}`}
+            className={`browser-tab${tab.id === activeTabId ? ' active' : ''}${tab.pinned ? ' pinned' : ''}${hasMedia ? ' has-media' : ''}${draggingTabId === tab.id ? ' dragging' : ''}${target}`}
             key={tab.id}
             data-browser-tab-id={tab.id}
             onPointerDown={(event) => {
-              if (event.button !== 0 || (event.target instanceof Element && event.target.closest('.browser-tab-close'))) return
+              if (event.button !== 0 || (event.target instanceof Element && event.target.closest('.browser-tab-close, .browser-tab-media'))) return
               tabDrag.current = { id: tab.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false }
             }}
             onPointerMove={(event) => {
@@ -481,12 +489,13 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, onAc
             }}
           >
             <button role="tab" aria-selected={tab.id === activeTabId} title={tab.title || tab.url || t('新标签页', 'New tab')} onClick={(event) => { if (suppressTabClick.current) event.preventDefault(); else onActivate(tab.id) }}><Icon name="globe" /><span>{tab.title || t('新标签页', 'New tab')}</span></button>
-            <button className="browser-tab-close" aria-label={t('关闭标签页', 'Close tab')} title={t('关闭标签页', 'Close tab')} onClick={() => closeTabs([tab.id])}><X aria-hidden="true" /></button>
+            <TabMediaButton playing={statuses[tab.id]?.mediaPlaying ?? false} muted={statuses[tab.id]?.muted ?? false} locale={locale} onToggle={() => toggleTabMute(tab.id)} />
+            <button className="browser-tab-close" aria-label={t('关闭标签页', 'Close tab')} title={t('关闭标签页', 'Close tab')} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeTabs([tab.id]) }}><X aria-hidden="true" /></button>
           </div>
         })}
         <button className="browser-new-tab" aria-label={t('新建标签页', 'New tab')} title={t('新建标签页', 'New tab')} onClick={onNewTab}><Plus aria-hidden="true" /></button>
       </div>
-      <div className="browser-tab-actions"><ReaderExpandButton expanded={expanded} locale={locale} onToggle={onExpand} /><button className="browser-icon-button" title={t('隐藏浏览器', 'Hide browser')} onClick={onClose}><Icon name="close" /></button></div>
+      <div className="browser-tab-actions"><button className="browser-icon-button" title={t('隐藏浏览器', 'Hide browser')} onClick={onClose}><Icon name="close" /></button></div>
     </div>
     {tabContextMenu ? (() => {
       const index = tabs.findIndex((tab) => tab.id === tabContextMenu.tabId)

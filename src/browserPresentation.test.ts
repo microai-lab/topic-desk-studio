@@ -1,7 +1,40 @@
 /** Regression tests for browser chrome state, trusted domains and bounded controls. */
 
 import { describe, expect, it, vi } from 'vitest'
-import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation } from './browserPresentation'
+import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+
+describe('runBrowserTabClose', () => {
+  it('removes each tab only after native close finishes and ignores duplicate ids', async () => {
+    const events: string[] = []
+    await runBrowserTabClose(['first', 'second', 'first'], async (id) => {
+      events.push(`native:${id}`)
+      await Promise.resolve()
+      events.push(`finished:${id}`)
+    }, (id) => events.push(`removed:${id}`), vi.fn())
+    expect(events).toEqual(['native:first', 'finished:first', 'removed:first', 'native:second', 'finished:second', 'removed:second'])
+  })
+
+  it('keeps a failed close visible and continues closing the remaining tabs', async () => {
+    const error = new Error('native close failed')
+    const removed = vi.fn()
+    const failed = vi.fn()
+    await runBrowserTabClose(['playing', 'other'], async (id) => {
+      if (id === 'playing') throw error
+    }, removed, failed)
+    expect(removed).toHaveBeenCalledExactlyOnceWith('other')
+    expect(failed).toHaveBeenCalledExactlyOnceWith('playing', error)
+  })
+
+  it('does nothing for an empty selection', async () => {
+    const close = vi.fn()
+    const removed = vi.fn()
+    const failed = vi.fn()
+    await runBrowserTabClose([], close, removed, failed)
+    expect(close).not.toHaveBeenCalled()
+    expect(removed).not.toHaveBeenCalled()
+    expect(failed).not.toHaveBeenCalled()
+  })
+})
 
 describe('runBrowserNavigation', () => {
   it('keeps a completion received before command resolution instead of restarting loading', async () => {

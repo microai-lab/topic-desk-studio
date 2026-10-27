@@ -541,26 +541,7 @@ document.addEventListener('click', (event) => {
 /// Apply tab-level website muting without exposing a command surface to the
 /// untrusted page. The observer covers media elements added after page load.
 fn apply_media_muting(view: &tauri::Webview, muted: bool) -> Result<(), String> {
-    let script = format!(
-        r#"(() => {{
-  window.__topicDeskMuted = {muted};
-  const apply = (root) => {{
-    if (root instanceof HTMLMediaElement) root.muted = window.__topicDeskMuted;
-    if (root.querySelectorAll) {{
-      for (const media of root.querySelectorAll('audio, video')) media.muted = window.__topicDeskMuted;
-    }}
-  }};
-  apply(document);
-  if (!window.__topicDeskMuteObserver) {{
-    window.__topicDeskMuteObserver = new MutationObserver((records) => {{
-      for (const record of records) for (const node of record.addedNodes) {{
-        if (node instanceof Element) apply(node);
-      }}
-    }});
-    window.__topicDeskMuteObserver.observe(document.documentElement, {{ childList: true, subtree: true }});
-  }}
-}})()"#
-    );
+    let script = format!("globalThis.__topicDeskMedia?.setMuted({muted})");
     view.eval(&script).map_err(|error| error.to_string())
 }
 
@@ -733,6 +714,32 @@ fn hide_article_views(app: &tauri::AppHandle, except: Option<&str>) -> Result<()
     Ok(())
 }
 
+/// Cookie persistence must never leave a closed tab playing off-screen. Only a
+/// native close failure prevents removal; a failed snapshot is reported separately.
+fn close_with_snapshot(
+    stop: impl FnOnce(),
+    snapshot: impl FnOnce() -> Result<(), String>,
+    destroy: impl FnOnce() -> Result<(), String>,
+    report: impl FnOnce(String),
+) -> Result<(), String> {
+    stop();
+    let saved = snapshot();
+    let closed = destroy();
+    if let Err(error) = saved {
+        report(error);
+    }
+    closed
+}
+
+fn close_article_view(app: &tauri::AppHandle, view: &tauri::Webview) -> Result<(), String> {
+    close_with_snapshot(
+        || crate::desktop_media::stop(view),
+        || crate::desktop_sessions::capture_before_close(app, view),
+        || view.close().map_err(|error| error.to_string()),
+        |error| crate::desktop_sessions::report(app, error),
+    )
+}
+
 /// Apply serialized UI requests off the UI thread (required by WebView2).
 /// Capabilities target only the main webview, not every webview in its window.
 pub fn browser_request(
@@ -744,19 +751,29 @@ pub fn browser_request(
 ) -> Result<(), String> {
     let result = match action {
         "closeAll" => {
-            {
-                let profile = app.state::<BrowserProfile>();
-                let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
-                session.tabs.clear();
-                session.active_tab = None;
-            }
+            let mut failed = Vec::new();
+            let mut first_error = None;
             for (label, view) in app.webviews() {
                 if label.starts_with("article-") {
-                    crate::desktop_sessions::capture_before_close(app, &view)?;
-                    view.close().map_err(|error| error.to_string())?;
+                    if let Err(error) = close_article_view(app, &view) {
+                        failed.push(label);
+                        first_error.get_or_insert(error);
+                    }
                 }
             }
-            Ok(())
+            let profile = app.state::<BrowserProfile>();
+            let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
+            session
+                .tabs
+                .retain(|id, _| failed.contains(&format!("article-{id}")));
+            if !session
+                .active_tab
+                .as_ref()
+                .is_some_and(|id| session.tabs.contains_key(id))
+            {
+                session.active_tab = None;
+            }
+            first_error.map_or(Ok(()), Err)
         }
         "hideAll" => {
             app.state::<BrowserProfile>()
@@ -770,7 +787,7 @@ pub fn browser_request(
             let tab_id = tab_id.as_deref().ok_or("缺少浏览器标签页")?;
             let label = tab_label(tab_id)?;
             if let Some(view) = app.get_webview(&label) {
-                crate::desktop_sessions::capture_before_close(app, &view)?;
+                close_article_view(app, &view)?;
             }
             {
                 let profile = app.state::<BrowserProfile>();
@@ -780,9 +797,7 @@ pub fn browser_request(
                     session.active_tab = None;
                 }
             }
-            app.get_webview(&label).map_or(Ok(()), |view| {
-                view.close().map_err(|error| error.to_string())
-            })
+            Ok(())
         }
         "sync" => {
             let tab_id = tab_id.as_deref().ok_or("缺少浏览器标签页")?;
@@ -884,6 +899,7 @@ pub fn browser_request(
                 // Run the storage isolation in every frame because third-party
                 // embeds can otherwise open their own persistent database.
                 .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
+                .initialization_script_for_all_frames(include_str!("page_media.js"))
                 .on_navigation(is_article_url)
                 .on_document_title_changed(move |view, title| {
                     browser_profile::title_changed(view.app_handle(), &title_tab, title)
@@ -1185,6 +1201,53 @@ pub fn save_screenshot(view: &tauri::Webview, path: &std::path::Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_close_stops_media_before_saving_and_always_disposes_after_snapshot_failure() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        for snapshot_fails in [false, true] {
+            steps.borrow_mut().clear();
+            assert!(close_with_snapshot(
+                || steps.borrow_mut().push("stop"),
+                || {
+                    steps.borrow_mut().push("snapshot");
+                    if snapshot_fails {
+                        Err("cookie snapshot failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    steps.borrow_mut().push("destroy");
+                    Ok(())
+                },
+                |error| {
+                    assert_eq!(error, "cookie snapshot failed");
+                    steps.borrow_mut().push("report");
+                },
+            )
+            .is_ok());
+            let expected = if snapshot_fails {
+                vec!["stop", "snapshot", "destroy", "report"]
+            } else {
+                vec!["stop", "snapshot", "destroy"]
+            };
+            assert_eq!(*steps.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn native_close_failure_is_returned_so_the_tab_can_still_be_retried() {
+        assert_eq!(
+            close_with_snapshot(
+                || {},
+                || Ok(()),
+                || Err("close failed".into()),
+                |_| panic!("unexpected snapshot error")
+            ),
+            Err("close failed".into()),
+        );
+    }
 
     #[test]
     fn readable_document_finishes_before_slow_subresources_without_accepting_old_pages() {

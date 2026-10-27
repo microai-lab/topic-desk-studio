@@ -232,14 +232,16 @@ h1 {
   position: absolute; inset: 0; opacity: 0; pointer-events: none;
   width: 100%; height: var(--shell-control-size);
   border: 1px solid color-mix(in srgb, var(--border) 88%, var(--muted)); border-radius: 8px;
-  padding: 0 11px 0 32px;
+  /* Reset WebKit's native text-field baseline and reserve the icon's full hit area. */
+  appearance: none; -webkit-appearance: none; margin: 0;
+  padding: 0 11px 0 calc(var(--shell-control-size) + 2px);
   color: var(--ink); background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
-  font-size: 12.5px; outline: none;
+  font-size: 12.5px; font-weight: 400; line-height: calc(var(--shell-control-size) - 2px); letter-spacing: normal; outline: none;
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 46%, transparent), 0 1px 2px color-mix(in srgb, var(--ink) 4%, transparent);
-  transform: scaleX(.88); transform-origin: left center;
-  transition: opacity 160ms, transform 240ms cubic-bezier(.4,0,.2,1), border-color 150ms, box-shadow 150ms, background 150ms;
+  transition: opacity 160ms, border-color 150ms, box-shadow 150ms, background 150ms;
 }
-.topbar-search.expanded input { opacity: 1; pointer-events: auto; transform: scaleX(1); }
+.topbar-search.expanded input { opacity: 1; pointer-events: auto; }
+.topbar-search input::placeholder { color: var(--muted); opacity: 1; font-weight: 400; }
 .topbar-search input:hover { border-color: color-mix(in srgb, var(--accent) 24%, var(--border)); background: var(--surface); }
 .topbar-search input:focus {
   border-color: var(--accent);
@@ -921,8 +923,13 @@ h1 {
 .reader-error { color: var(--red); font-size: 12px; padding-top: 8px; overflow-wrap: anywhere; }
 .reader-divider { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; z-index: 2; cursor: col-resize; touch-action: none; }
 .reader-divider:hover, .reader-divider:focus-visible { background: var(--accent); opacity: .35; }
-.reader-expanded { grid-template-columns: minmax(0, 1fr) !important; }
-.reader-expanded .topic-list-pane { display: none; }
+/* Keep both grid tracks and the list DOM alive during focus-mode transitions. */
+.topic-list-pane { overflow-x: hidden; opacity: 1; visibility: visible; transition: opacity 180ms ease 80ms, visibility 0s; }
+.reader-expanded .topic-list-pane { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 120ms ease, visibility 0s 120ms; }
+.reader-expanded .browser-pane { border-left-color: transparent; }
+.reader-expand { flex: none; transition: color 160ms ease, background-color 160ms ease; }
+.reader-expand:hover { color: var(--accent); }
+.reader-expand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reader-expanded .reader-divider { display: none; }
 /* Reserve room for both panes, based on usable workspace rather than screen pixels. */
 @container workspace (max-width: 779px) {
@@ -941,7 +948,7 @@ h1 {
 .browser-chrome { background: var(--surface); color: var(--ink); }
 .browser-chrome svg { width: 20px; height: 20px; flex: none; }
 .browser-tabbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: var(--shell-header-height); min-height: var(--shell-header-height); flex: none; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
-.browser-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.browser-tabs { flex: 1; display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .browser-tabs::-webkit-scrollbar { display: none; }
 .browser-tab { position: relative; display: flex; align-items: center; min-width: 116px; max-width: 220px; height: var(--shell-control-size); border-radius: 8px; color: var(--muted); background: transparent; flex: 0 1 180px; cursor: grab; user-select: none; touch-action: none; transition: opacity 120ms, transform 120ms, min-width 150ms, max-width 150ms, flex-basis 150ms; }
 .browser-tab.active { color: var(--ink); background: var(--surface); box-shadow: 0 1px 2px #0000000d; }
@@ -1154,7 +1161,7 @@ button.browser-download-copy:disabled { cursor: default; }
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .desk-workspace, .topbar-search, .topbar-search input { transition: none; }
+  .desk-workspace, .topic-list-pane, .reader-expanded .topic-list-pane, .reader-expand, .topbar-search, .topbar-search input { transition: none; }
 }
 
 /* Editable proxy presets occupy one field; the menu does not shift the settings form. */
@@ -1169,3 +1176,10 @@ button.browser-download-copy:disabled { cursor: default; }
 .proxy-preset-options [role="option"] { padding: 9px 10px; border-radius: 6px; font-size: 13px; overflow-wrap: anywhere; cursor: pointer; }
 .proxy-preset-options [aria-selected="true"] { color: var(--accent); }
 .proxy-preset-options .highlighted { background: var(--accent-dim); }
+
+/* Media controls remain clickable on inactive and pinned tabs without widening quiet tabs. */
+.browser-tab-media { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; color: var(--accent); background: transparent; cursor: pointer; }
+.browser-tab-media:hover { background: var(--accent-dim); }
+.browser-tab-media.is-muted { color: var(--muted); }
+.browser-tab-media:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.browser-tab.pinned.has-media { min-width: 64px; max-width: 64px; flex-basis: 64px; }

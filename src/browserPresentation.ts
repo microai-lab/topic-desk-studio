@@ -49,6 +49,16 @@ export async function runBrowserNavigation(request: () => Promise<void>, started
   catch (error) { failed(); throw error }
 }
 
+/** Keep failed native closes visible and retryable, while allowing other tabs
+ * in a bulk close to finish. Removing the chrome first can orphan playing media. */
+export async function runBrowserTabClose(ids: readonly string[], close: (id: string) => Promise<void>, closed: (id: string) => void, failed: (id: string, error: unknown) => void): Promise<void> {
+  for (const id of new Set(ids)) {
+    try { await close(id) }
+    catch (error) { failed(id, error); continue }
+    closed(id)
+  }
+}
+
 /** Reapply native bounds after backgrounding/sleep, even when DOM size is unchanged.
  * Recovery uses events only; it never starts a frontend polling timer. */
 export function observeReaderRecovery(host: Window, page: Document, recover: () => void): () => void {
