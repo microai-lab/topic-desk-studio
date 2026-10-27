@@ -12,7 +12,7 @@ use crate::catalog::{
 use crate::credential_cipher::{CredentialCipher, EncryptedCredential, ALGORITHM, MASTER_KEY_FILE};
 use crate::error::{AppError, AppResult};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:7897";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/001_initial.sql");
 
@@ -35,6 +35,16 @@ pub fn open_database(path: &Path) -> AppResult<Connection> {
     initialize(&mut connection, &path.with_file_name(MASTER_KEY_FILE))?;
     ensure_platforms(&connection)?;
     Ok(connection)
+}
+
+/// Upgrade restored snapshots before repositories use the current query schema.
+/// The storage adapter owns the two-database rollback while these migrations run.
+pub(crate) fn upgrade_restored(
+    connection: &mut Connection,
+    master_key_path: &Path,
+) -> AppResult<()> {
+    initialize(connection, master_key_path)?;
+    ensure_platforms(connection)
 }
 
 /// Open an independent query-only connection so page reads do not wait on the command writer lock.
@@ -113,7 +123,7 @@ fn ensure_platforms(connection: &Connection) -> AppResult<()> {
 /// Apply a fresh schema or a known forward-only migration.
 fn initialize(connection: &mut Connection, master_key_path: &Path) -> AppResult<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    match version {
+    let result = match version {
         SCHEMA_VERSION => Ok(()),
         0 => {
             let existing: i64 = connection.query_row(
@@ -198,10 +208,26 @@ fn initialize(connection: &mut Connection, master_key_path: &Path) -> AppResult<
             migrate_from_v10(connection)
         }
         10 => migrate_from_v10(connection),
+        11 => migrate_from_v11(connection),
         unsupported => Err(AppError::Initialization(format!(
             "不支持的 Topic Desk 数据库版本：{unsupported}"
         ))),
+    };
+    result?;
+    let current: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current == 11 {
+        migrate_from_v11(connection)?;
     }
+    Ok(())
+}
+
+/// Version 12 adds mutable reading access independently of immutable topic identity metadata.
+fn migrate_from_v11(connection: &mut Connection) -> AppResult<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch("CREATE TABLE topic_reading_link (topic_id INTEGER PRIMARY KEY REFERENCES topic(id) ON DELETE CASCADE, url TEXT NOT NULL);")?;
+    transaction.pragma_update(None, "user_version", 12_i64)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 /// Version 11 adds declarative custom-source metadata without changing built-in parsers.
@@ -544,6 +570,42 @@ mod tests {
                  );",
             )
             .expect("legacy domain tables should initialize");
+    }
+
+    #[test]
+    fn migrates_v11_reading_access_atomically_and_preserves_existing_topics() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(INITIAL_SCHEMA).unwrap();
+        connection
+            .execute_batch("DROP TABLE topic_reading_link; PRAGMA user_version=11;")
+            .unwrap();
+        initialize(&mut connection, Path::new("unused-test-key")).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
+        assert!(connection
+            .prepare("SELECT url FROM topic_reading_link")
+            .is_ok());
+    }
+    #[test]
+    fn failed_v11_migration_keeps_old_version_and_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(INITIAL_SCHEMA).unwrap();
+        connection.execute_batch("DROP TABLE topic_reading_link; CREATE VIEW topic_reading_link AS SELECT 1; PRAGMA user_version=11;").unwrap();
+        assert!(initialize(&mut connection, Path::new("unused-test-key")).is_err());
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        let kind: String = connection
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name='topic_reading_link'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "view");
     }
 
     /// A new database must be initialized exactly to the supported schema version.

@@ -73,6 +73,8 @@ pub struct TopicView {
     pub platform_name: String,
     pub category: TopicCategory,
     pub title: String,
+    /// Current reading address may include refreshed publisher access parameters;
+    /// the database's first-observed canonical URL remains immutable.
     pub url: String,
     pub published_time: Option<String>,
     pub global_rank: i64,

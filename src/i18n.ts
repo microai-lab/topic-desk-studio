@@ -82,9 +82,12 @@ export interface Messages {
   langZh: string
   langEn: string
   sectionNetwork: string
+  labelProxyPreset: string
+  proxyDefault: string
+  proxyDirect: string
+  proxyCustom: string
   labelProxy: string
   proxyPlaceholder: string
-  proxyHelp: string
   networkSaveNotice: string
   storageHeading: string
   storageDesc: string
@@ -183,8 +186,8 @@ const zh: Messages = {
   navNew: '最近新增',
   navSettings: '设置',
   navMain: '主导航',
-  sidebarCollapse: '收起侧边栏',
-  sidebarExpand: '展开侧边栏',
+  sidebarCollapse: '收起',
+  sidebarExpand: '展开',
   btnRefresh: '采集数据',
   btnRefreshing: '采集中…',
   btnQuery: '刷新列表',
@@ -246,9 +249,12 @@ const zh: Messages = {
   langZh: '中文',
   langEn: 'English',
   sectionNetwork: '网络代理',
+  labelProxyPreset: '选择代理',
+  proxyDefault: '（默认）',
+  proxyDirect: '直连（不使用代理）',
+  proxyCustom: '自定义地址（在下方编辑）',
   labelProxy: 'HTTP(S) 代理',
   proxyPlaceholder: 'http://127.0.0.1:7897',
-  proxyHelp: '仅直连受限的境外来源使用该代理；国内及可直连来源保持直连。留空表示全部直连。',
   networkSaveNotice: '采集代理设置已保存。',
   storageHeading: '本地数据管理',
   storageDesc: '话题、采集历史和浏览记录均保存在本机。系统会自动汇总趋势并清理过期运行记录。',
@@ -408,9 +414,12 @@ const en: Messages = {
   langZh: '中文',
   langEn: 'English',
   sectionNetwork: 'Network proxy',
+  labelProxyPreset: 'Choose proxy',
+  proxyDefault: '(Default)',
+  proxyDirect: 'Direct (no proxy)',
+  proxyCustom: 'Custom address (edit below)',
   labelProxy: 'HTTP(S) proxy',
   proxyPlaceholder: 'http://127.0.0.1:7897',
-  proxyHelp: 'Only restricted international sources use this proxy. Domestic and directly reachable sources remain direct. Leave blank to make every source direct.',
   networkSaveNotice: 'Collection proxy saved.',
   storageHeading: 'Local Data',
   storageDesc: 'Topics, collection history, and browser records stay on this device. Trends are rolled up and expired run data is pruned automatically.',

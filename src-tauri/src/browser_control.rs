@@ -458,9 +458,7 @@ pub async fn browser_control(
             downloads,
         } => {
             if cookies {
-                view()?
-                    .clear_all_browsing_data()
-                    .map_err(|e| e.to_string())?;
+                crate::desktop_sessions::clear(&app)?;
             }
             let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
             // Clear selected metadata atomically; downloads themselves are retained.
@@ -1198,26 +1196,29 @@ mod tests {
     }
 
     #[test]
-    fn flash_plan_dispatches_distinct_visible_paragraphs_independently() {
-        let (max_items, max_parallel) = translator::page_request_plan("deepseek-flash");
-        let mut pending = (0..5)
-            .map(|id| (id, format!("paragraph {id}")))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let ready = (0..5).collect::<Vec<_>>();
-        let mut active_texts = std::collections::HashMap::new();
-        let mut waiters = std::collections::HashMap::new();
-        for _ in 0..max_parallel {
-            let batch = take_visible_translation_batch(
-                &ready,
-                &mut pending,
-                &mut active_texts,
-                &mut waiters,
-                max_items,
-                true,
-            );
-            assert_eq!(batch.len(), 1);
+    fn all_model_plans_dispatch_single_fragments_and_leave_excess_work_queued() {
+        for model in ["deepseek-flash", "deepseek-chat", "other-model"] {
+            let (max_items, max_parallel) = translator::page_request_plan(model);
+            let mut pending = (0..5)
+                .map(|id| (id, format!("paragraph {id}")))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let ready = (0..5).collect::<Vec<_>>();
+            let mut active_texts = std::collections::HashMap::new();
+            let mut waiters = std::collections::HashMap::new();
+            for _ in 0..max_parallel {
+                let batch = take_visible_translation_batch(
+                    &ready,
+                    &mut pending,
+                    &mut active_texts,
+                    &mut waiters,
+                    max_items,
+                    true,
+                );
+                assert_eq!(batch.len(), 1);
+            }
+            assert_eq!(pending.len(), 5 - max_parallel);
+            assert_eq!(max_items, 1);
         }
-        assert_eq!(pending.len(), 1);
     }
 
     #[test]

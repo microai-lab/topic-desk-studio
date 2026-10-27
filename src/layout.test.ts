@@ -1,9 +1,28 @@
 /** Laptop-size regression rules: bounded split panes, responsive CSS, and native defaults. */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { clampReaderWidth, DEFAULT_READER_PERCENT, readerColumns, READER_PANE_MIN_WIDTH, sidebarNavigationPlan, SPLIT_WORKSPACE_MIN_WIDTH, TOPIC_PANE_MIN_WIDTH } from './layout'
+import { clampReaderWidth, DEFAULT_READER_PERCENT, readerColumns, readerDragWidth, READER_PANE_MIN_WIDTH, sidebarNavigationPlan, SPLIT_WORKSPACE_MIN_WIDTH, TOPIC_PANE_MIN_WIDTH } from './layout'
 
 describe('reader sizing', () => {
+  it('ignores stale capture, released buttons and invalid geometry after idle', () => {
+    expect(readerDragWidth(7, 7, 1, 400, 1000, 1000)).toBe(60)
+    expect(readerDragWidth(7, 7, 1, -100, 1000, 1000)).toBe(70)
+    expect(readerDragWidth(7, 7, 1, 900, 1000, 1000)).toBe(35)
+    for (const [active, pointer, buttons] of [[null, 7, 1], [7, 8, 1], [7, 7, 0], [7, 7, 2]]) {
+      expect(readerDragWidth(active!, pointer!, buttons!, 400, 1000, 1000)).toBeUndefined()
+    }
+    for (const width of [0, -1, NaN, Infinity]) {
+      expect(readerDragWidth(7, 7, 1, 400, 1000, width)).toBeUndefined()
+    }
+    expect(readerDragWidth(7, 7, 1, NaN, 1000, 1000)).toBeUndefined()
+    expect(readerDragWidth(7, 7, 1, 400, Infinity, 1000)).toBeUndefined()
+  })
+  it('shows source before category in the topic filters', () => {
+    const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8')
+    const filters = app.slice(app.indexOf('<section className="filters"'), app.indexOf('<div className="results-heading"'))
+    expect([...filters.matchAll(/<FilterDropdown label=\{m\.(filter\w+)\}/g)].map(match => match[1]))
+      .toEqual(['filterRegion', 'filterSource', 'filterCategory', 'filterSort'])
+  })
   it('preserves valid proportions and clamps pointer/keyboard extremes', () => {
     for (const [input, expected] of [[0, 35], [34, 35], [35, 35], [60, 60], [70, 70], [100, 70], [-1, 35]]) {
       expect(clampReaderWidth(input!)).toBe(expected)

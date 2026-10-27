@@ -15,7 +15,7 @@ use serde_json::Value;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use url::Url;
 
-use crate::catalog::google_trends_topic_url;
+use crate::catalog::{google_trends_topic_url, HUGGING_FACE_TRENDING_MODELS_ENDPOINT};
 use crate::database::open_database;
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -26,7 +26,11 @@ use crate::repository::TopicRepository;
 const ITEMS_PER_PLATFORM: usize = 50;
 const REQUEST_TIMEOUT_SECONDS: u64 = 15;
 const MAX_WORKERS: usize = 6;
-const HUGGING_FACE_TRENDING_MODELS_ENDPOINT: &str = "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=50&expand=trendingScore,likes,downloads,createdAt,lastModified";
+const LEGACY_HUGGING_FACE_MODELS_ENDPOINT: &str = "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=50&expand=trendingScore,likes,downloads,createdAt,lastModified";
+// A public headline index is a bounded fallback, not a replacement for the publisher feed.
+const MIT_NEWS_INDEX_ENDPOINT: &str =
+    "https://www.bing.com/news/search?q=site%3Atechnologyreview.com&format=rss";
+const MIT_OFFICIAL_FEED: &str = "https://www.technologyreview.com/feed/";
 const USER_AGENT_VALUE: &str =
     "TopicDeskStudio/0.1 (+https://github.com/dataelement/topic-desk-studio)";
 
@@ -136,22 +140,36 @@ fn source_requires_proxy(platform: &PlatformSource) -> bool {
     }
 }
 
-/// Fetch one source with known fallbacks and reject an apparently successful empty parse.
-fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
-    // Upgrade only the endpoint shipped by old installations. Once the user
+/// Resolve shipped endpoint repairs while preserving every user-customized URL.
+fn source_endpoints(platform: &PlatformSource) -> Vec<&str> {
+    // Upgrade only the endpoints shipped by old installations. Once the user
     // edits this field, their configured endpoint must remain authoritative.
-    let mut endpoints =
-        if platform.code == "hugging-face" && platform.endpoint_url.contains("/api/daily_papers") {
-            vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
-        } else {
-            vec![platform.endpoint_url.as_str()]
-        };
+    let mut endpoints = if platform.code == "hugging-face"
+        && (platform.endpoint_url == LEGACY_HUGGING_FACE_MODELS_ENDPOINT
+            || platform.endpoint_url == "https://huggingface.co/api/daily_papers")
+    {
+        vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
+    } else {
+        vec![platform.endpoint_url.as_str()]
+    };
     match platform.code.as_str() {
         "36kr" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=36kr"),
         "xueqiu" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=xueqiu"),
         "zhihu" => endpoints.push("https://news.orz.ai/api/v1/dailynews/?platform=zhihu"),
+        "mit-technology-review"
+            if platform.endpoint_url == MIT_OFFICIAL_FEED
+                && matches!(platform.parser_type, SourceParserType::Builtin) =>
+        {
+            endpoints.push(MIT_NEWS_INDEX_ENDPOINT);
+        }
         _ => {}
     }
+    endpoints
+}
+
+/// Fetch one source with known fallbacks and reject an apparently successful empty parse.
+fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
+    let endpoints = source_endpoints(platform);
     let mut failures = Vec::new();
     for endpoint in endpoints {
         for empty_attempt in 0..2 {
@@ -195,6 +213,9 @@ fn fetch_endpoint(
         .unwrap_or_default()
         .to_ascii_lowercase();
     let bytes = response.bytes().map_err(collection_error)?;
+    if platform.code == "mit-technology-review" && endpoint == MIT_NEWS_INDEX_ENDPOINT {
+        return parse_mit_news_index(&bytes);
+    }
 
     match platform.parser_type {
         SourceParserType::Rss => return parse_feed(&platform.code, &bytes),
@@ -377,6 +398,75 @@ fn parse_feed(code: &str, bytes: &[u8]) -> AppResult<ParsedFeed> {
         fetched_count,
         topics,
     })
+}
+
+/// Recover only official article permalinks from the public news index. Index
+/// GUIDs are unstable tracking URLs; WordPress post IDs must match the original
+/// publisher feed's GUIDs so switching transports never creates duplicates.
+fn mit_index_article(value: &str) -> Option<(String, String)> {
+    let mut url = Url::parse(value).ok()?;
+    if matches!(url.host_str(), Some("www.bing.com" | "bing.com"))
+        && url.path() == "/news/apiclick.aspx"
+    {
+        let targets = url
+            .query_pairs()
+            .filter(|(key, _)| key == "url")
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>();
+        if targets.len() != 1 {
+            return None;
+        }
+        url = Url::parse(&targets[0]).ok()?;
+    }
+    if !matches!(url.scheme(), "http" | "https")
+        || !matches!(
+            url.host_str(),
+            Some("www.technologyreview.com" | "technologyreview.com")
+        )
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    let pattern = Regex::new(
+        r"^/[0-9]{4}/(?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01])/([1-9][0-9]*)/[^/]+/?$",
+    )
+    .ok()?;
+    let post_id = pattern.captures(url.path())?.get(1)?.as_str().to_owned();
+    url.set_scheme("https").ok()?;
+    url.set_host(Some("www.technologyreview.com")).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Some((
+        url.into(),
+        format!("https://www.technologyreview.com/?p={post_id}"),
+    ))
+}
+
+/// Only publisher articles are eligible: reject author/profile pages, unrelated
+/// publishers and repeated index entries. Empty results still fail collection.
+fn parse_mit_news_index(bytes: &[u8]) -> AppResult<ParsedFeed> {
+    let mut feed = parse_feed("mit-technology-review", bytes)?;
+    let mut seen = HashSet::new();
+    feed.topics = feed
+        .topics
+        .into_iter()
+        .filter_map(|mut topic| {
+            let (url, stable_id) = mit_index_article(&topic.url)?;
+            if !seen.insert(stable_id.clone()) {
+                return None;
+            }
+            topic.url = url;
+            topic.stable_id = Some(stable_id);
+            Some(topic)
+        })
+        .collect();
+    for (index, topic) in feed.topics.iter_mut().enumerate() {
+        topic.rank = (index + 1) as u32;
+    }
+    feed.invalid_count = feed.fetched_count.saturating_sub(feed.topics.len() as u32);
+    Ok(feed)
 }
 
 /// Parse public JSON APIs whose schemas are stable enough for deterministic extraction.
@@ -1179,6 +1269,139 @@ mod tests {
         assert_eq!(feed.topics[0].title, "fast/project");
         assert_eq!(feed.topics[0].url, "https://github.com/fast/project");
         assert_eq!(feed.topics[0].heat, Some(1_200.0));
+    }
+
+    #[test]
+    fn mit_fallback_is_secondary_and_preserves_custom_source_configuration() {
+        let mut platform = PlatformSource {
+            id: 1,
+            code: "mit-technology-review".into(),
+            endpoint_url: MIT_OFFICIAL_FEED.into(),
+            parser_type: SourceParserType::Builtin,
+            parser_config: Default::default(),
+            proxy_mode: SourceProxyMode::Direct,
+        };
+        assert_eq!(
+            source_endpoints(&platform),
+            vec![MIT_OFFICIAL_FEED, MIT_NEWS_INDEX_ENDPOINT]
+        );
+        platform.endpoint_url = "https://example.org/custom.xml".into();
+        assert_eq!(
+            source_endpoints(&platform),
+            vec!["https://example.org/custom.xml"]
+        );
+        platform.endpoint_url = MIT_OFFICIAL_FEED.into();
+        platform.parser_type = SourceParserType::Rss;
+        assert_eq!(source_endpoints(&platform), vec![MIT_OFFICIAL_FEED]);
+    }
+
+    #[test]
+    fn mit_index_filters_profiles_duplicates_and_preserves_official_topic_identity() {
+        let original = br#"<rss version="2.0"><channel><title>MIT</title><item>
+            <title>Original title</title><link>https://www.technologyreview.com/2026/10/26/1147645/story/</link>
+            <guid isPermaLink="false">https://www.technologyreview.com/?p=1147645</guid>
+            </item></channel></rss>"#;
+        let index = br#"<rss version="2.0"><channel><title>News index</title>
+            <item><title>Author</title><link>https://www.technologyreview.com/author/person/</link></item>
+            <item><title>Index title</title><link>https://www.bing.com/news/apiclick.aspx?url=https%3A%2F%2Fwww.technologyreview.com%2F2026%2F10%2F26%2F1147645%2Fstory%2F%3Fref%3Dindex</link><guid>tracking-guid</guid></item>
+            <item><title>Duplicate</title><link>https://technologyreview.com/2026/10/26/1147645/story/</link></item>
+            <item><title>Other publication</title><link>https://example.org/2026/10/26/1147645/story/</link></item>
+            </channel></rss>"#;
+        let feed = parse_mit_news_index(index).unwrap();
+        assert_eq!(feed.fetched_count, 4);
+        assert_eq!(feed.invalid_count, 3);
+        assert_eq!(feed.topics.len(), 1);
+        assert_eq!(feed.topics[0].rank, 1);
+        assert_eq!(feed.topics[0].title, "Index title");
+        assert_eq!(
+            feed.topics[0].url,
+            "https://www.technologyreview.com/2026/10/26/1147645/story/"
+        );
+        let official = parse_feed("mit-technology-review", original).unwrap();
+        assert_eq!(
+            crate::identity::identify_topic(&feed.topics[0])
+                .unwrap()
+                .hash,
+            crate::identity::identify_topic(&official.topics[0])
+                .unwrap()
+                .hash
+        );
+    }
+
+    #[test]
+    fn mit_index_rejects_untrusted_links_and_invalid_feeds() {
+        for url in [
+            "javascript:alert(1)",
+            "file:///2026/10/26/123/story/",
+            "https://www.technologyreview.com.evil.org/2026/10/26/123/story/",
+            "https://www.technologyreview.com@evil.org/2026/10/26/123/story/",
+            "https://user:password@www.technologyreview.com/2026/10/26/123/story/",
+            "https://www.technologyreview.com:8443/2026/10/26/123/story/",
+            "https://www.technologyreview.com/2026/13/26/123/story/",
+            "https://www.technologyreview.com/2026/10/26/0/story/",
+            "https://www.bing.com/news/apiclick.aspx?url=javascript%3Aalert(1)",
+            "https://www.bing.com/news/apiclick.aspx?url=x&url=y",
+            "https://evil.org/redirect?url=https://www.technologyreview.com/2026/10/26/123/story/",
+        ] {
+            assert!(mit_index_article(url).is_none(), "{url}");
+        }
+        assert!(parse_mit_news_index(b"not an RSS document").is_err());
+        let empty = parse_mit_news_index(
+            br#"<rss version="2.0"><channel><title>Empty</title></channel></rss>"#,
+        )
+        .unwrap();
+        assert!(empty.topics.is_empty());
+    }
+
+    #[test]
+    fn repairs_only_shipped_hugging_face_endpoints_and_expands_fields_individually() {
+        let mut platform = PlatformSource {
+            id: 1,
+            code: "hugging-face".into(),
+            endpoint_url: LEGACY_HUGGING_FACE_MODELS_ENDPOINT.into(),
+            parser_type: SourceParserType::Builtin,
+            parser_config: Default::default(),
+            proxy_mode: SourceProxyMode::Proxy,
+        };
+        for legacy in [
+            LEGACY_HUGGING_FACE_MODELS_ENDPOINT,
+            "https://huggingface.co/api/daily_papers",
+        ] {
+            platform.endpoint_url = legacy.into();
+            assert_eq!(
+                source_endpoints(&platform),
+                vec![HUGGING_FACE_TRENDING_MODELS_ENDPOINT]
+            );
+        }
+        let url = Url::parse(HUGGING_FACE_TRENDING_MODELS_ENDPOINT).unwrap();
+        let expanded = url
+            .query_pairs()
+            .filter(|(name, _)| name == "expand")
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expanded,
+            [
+                "trendingScore",
+                "likes",
+                "downloads",
+                "createdAt",
+                "lastModified"
+            ]
+        );
+        for custom in [
+            "https://huggingface.co/api/models?limit=10",
+            "https://example.org/api/daily_papers",
+        ] {
+            platform.endpoint_url = custom.into();
+            assert_eq!(source_endpoints(&platform), vec![custom]);
+        }
+        platform.code = "custom-models".into();
+        platform.endpoint_url = LEGACY_HUGGING_FACE_MODELS_ENDPOINT.into();
+        assert_eq!(
+            source_endpoints(&platform),
+            vec![LEGACY_HUGGING_FACE_MODELS_ENDPOINT]
+        );
     }
 
     /// Hugging Face must expose model repositories ranked by trending score, not papers.

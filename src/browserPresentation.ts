@@ -37,9 +37,9 @@ export function clampDeviceDimension(value: number, minimum: number): number {
   return Math.max(minimum, Math.min(2560, value))
 }
 
-/** Build a direct page-translation request from the saved browser preference. */
-export function pageTranslationRequest(settings: BrowserSettings): BrowserAction {
-  return { kind: 'translatePage', targetLanguage: settings.translationLanguage }
+/** The same button restores an active translation or starts the saved target language. */
+export function pageTranslationRequest(settings: BrowserSettings, translated = false): BrowserAction {
+  return translated ? { kind: 'restorePageTranslation' } : { kind: 'translatePage', targetLanguage: settings.translationLanguage }
 }
 
 /** Mark loading before dispatch so a fast native completion cannot be overwritten afterward. */
@@ -47,4 +47,26 @@ export async function runBrowserNavigation(request: () => Promise<void>, started
   started()
   try { await request() }
   catch (error) { failed(); throw error }
+}
+
+/** Reapply native bounds after backgrounding/sleep, even when DOM size is unchanged.
+ * Recovery uses events only; it never starts a frontend polling timer. */
+export function observeReaderRecovery(host: Window, page: Document, recover: () => void): () => void {
+  const resume = () => { if (!page.hidden) recover() }
+  host.addEventListener('focus', resume)
+  host.addEventListener('pageshow', resume)
+  page.addEventListener('visibilitychange', resume)
+  return () => {
+    host.removeEventListener('focus', resume)
+    host.removeEventListener('pageshow', resume)
+    page.removeEventListener('visibilitychange', resume)
+  }
+}
+
+/** Recreate temporary native views only after clearing succeeds. This also
+ * prevents saved-cookie snapshots from outliving the cleared browser stores. */
+export async function runBrowserCookieClear(clear: () => Promise<unknown>, reset: () => void, reopen: () => Promise<void>): Promise<void> {
+  await clear()
+  reset()
+  await reopen()
 }

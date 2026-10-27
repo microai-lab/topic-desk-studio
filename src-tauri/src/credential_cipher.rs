@@ -58,7 +58,15 @@ impl CredentialCipher {
 
     /// Encrypt a non-empty API key with a fresh nonce and bind it to this application purpose.
     pub fn encrypt(&self, plaintext: &str) -> AppResult<EncryptedCredential> {
-        let plaintext = plaintext.trim();
+        self.encrypt_scoped(plaintext.trim(), AAD)
+    }
+
+    /// Encrypt a native-only payload in a separate authenticated purpose namespace.
+    pub(crate) fn encrypt_scoped(
+        &self,
+        plaintext: &str,
+        aad: &[u8],
+    ) -> AppResult<EncryptedCredential> {
         if plaintext.is_empty() {
             return Err(AppError::InvalidInput("API Key 不能为空".into()));
         }
@@ -71,7 +79,7 @@ impl CredentialCipher {
                 Nonce::from_slice(&nonce),
                 aes_gcm::aead::Payload {
                     msg: plaintext.as_bytes(),
-                    aad: AAD,
+                    aad,
                 },
             )
             .map_err(|_| AppError::Credential("模型 API Key 加密失败".into()))?;
@@ -83,6 +91,15 @@ impl CredentialCipher {
 
     /// Decrypt and authenticate a database payload into memory that zeroes itself on drop.
     pub fn decrypt(&self, encrypted: &EncryptedCredential) -> AppResult<Zeroizing<String>> {
+        self.decrypt_scoped(encrypted, AAD)
+    }
+
+    /// Authenticate the caller's purpose before exposing a short-lived plaintext buffer.
+    pub(crate) fn decrypt_scoped(
+        &self,
+        encrypted: &EncryptedCredential,
+        aad: &[u8],
+    ) -> AppResult<Zeroizing<String>> {
         if encrypted.nonce.len() != 12 {
             return Err(AppError::Credential("模型 API Key 的随机数长度无效".into()));
         }
@@ -92,7 +109,7 @@ impl CredentialCipher {
                 Nonce::from_slice(&encrypted.nonce),
                 aes_gcm::aead::Payload {
                     msg: &encrypted.ciphertext,
-                    aad: AAD,
+                    aad,
                 },
             )
             .map_err(|_| AppError::Credential("模型 API Key 解密或完整性校验失败".into()))?;

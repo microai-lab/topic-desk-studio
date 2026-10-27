@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 aes = { version = "0.8", features = ["zeroize"] }
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 base64 = "0.22"
+cookie = "0.18"
 encoding_rs = "0.8"
 feed-rs = "2"
 futures-util = "0.3"
@@ -45,6 +46,6 @@ strip = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage", "NSImageRep", "NSBitmapImageRep"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSError"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["WKDownload", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKSnapshotConfiguration", "block2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSError", "NSHTTPCookie", "NSDate", "NSArray", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKDownload", "WKHTTPCookieStore", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKSnapshotConfiguration", "block2"] }
 block2 = "0.6"

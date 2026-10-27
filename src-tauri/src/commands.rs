@@ -713,26 +713,7 @@ pub async fn collect_xiaohongshu_session(
         return Err("当前标签页不是小红书页面".into());
     }
 
-    let script = r#"
-(() => {
-  const rows = [];
-  const seen = new Set();
-  for (const link of document.querySelectorAll('a[href*="/explore/"]')) {
-    let url;
-    try { url = new URL(link.href, location.href); } catch (_) { continue; }
-    const match = url.pathname.match(/^\/explore\/([a-f0-9]{24})(?:\/|$)/i);
-    if (!match || seen.has(match[1])) continue;
-    const card = link.closest('section, article, .note-item, [class*="note-item"]') || link.parentElement;
-    const titleNode = card?.querySelector('.title span, .title, [class*="title"] span, [class*="title"]');
-    const title = (titleNode?.textContent || link.getAttribute('aria-label') || '').trim();
-    if (!title) continue;
-    seen.add(match[1]);
-    rows.push({ id: match[1].toLowerCase(), title, url: `https://www.xiaohongshu.com/explore/${match[1]}` });
-    if (rows.length >= 50) break;
-  }
-  return rows;
-})()
-"#;
+    let script = include_str!("xiaohongshu_cards.js");
     let (sender, receiver) = std::sync::mpsc::channel();
     article
         .eval_with_callback(script, move |value| {
@@ -755,20 +736,17 @@ pub async fn collect_xiaohongshu_session(
     let mut topics = Vec::new();
     for card in cards {
         let title = card.title.split_whitespace().collect::<Vec<_>>().join(" ");
-        let url = url::Url::parse(&card.url).map_err(|_| "小红书笔记地址无效")?;
-        if card.id.len() != 24
-            || !card.id.bytes().all(|value| value.is_ascii_hexdigit())
-            || url.host_str() != Some("www.xiaohongshu.com")
-            || url.path() != format!("/explore/{}", card.id)
-            || title.is_empty()
-        {
+        let Some(url) = crate::xiaohongshu::note_link(&card.url, &card.id) else {
+            continue;
+        };
+        if title.is_empty() {
             continue;
         }
         topics.push(crate::models::CollectedTopic {
             platform_code: "xiaohongshu".into(),
-            stable_id: Some(card.id),
+            stable_id: Some(card.id.to_ascii_lowercase()),
             title: title.chars().take(180).collect(),
-            url: url.to_string(),
+            url,
             published_time: None,
             rank: topics.len() as u32 + 1,
             heat: None,

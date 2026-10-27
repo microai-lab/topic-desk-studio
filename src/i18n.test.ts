@@ -13,3 +13,20 @@ describe('model settings save notice', () => {
     }
   })
 })
+
+/** Compact sidebar actions stay legible inside the narrow navigation footer. */
+describe('sidebar toggle labels', () => {
+  it('uses short Chinese labels in both directions', () => {
+    expect(messages.zh.sidebarCollapse).toBe('收起')
+    expect(messages.zh.sidebarExpand).toBe('展开')
+  })
+})
+
+/** Proxy settings omit the retired routing explanation in both locales. */
+describe('proxy settings copy', () => {
+  it('removes the obsolete routing help text', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      expect(messages[locale]).not.toHaveProperty('proxyHelp')
+    }
+  })
+})

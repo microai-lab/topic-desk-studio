@@ -55,7 +55,7 @@ xattr -d com.apple.quarantine /Applications/Topic\ Desk\ Studio.app
 
 In **Settings → Sources**, enable or disable individual sources, edit their settings, drag to reorder them, or add a custom RSS, JSON, or HTML source. Import and export one source or the full list to reuse your setup. **Restore defaults** resets built-in sources while retaining custom sources and historical topics.
 
-Public feeds can become unavailable when sites change or restrict access. Check the source's latest status and error details, and configure a collection proxy in **Settings → General** when needed.
+Public feeds can become unavailable when sites change or restrict access. If MIT Technology Review’s official feed is unavailable, the app can use Bing’s public news index to recover article headlines and original links. Indexed results may be delayed or incomplete. Check the source's latest status and error details, and configure a collection proxy in **Settings → General** when needed.
 
 **Settings → Local data** shows storage health and offers cleanup, local backup, and restoration of the latest backup. The app keeps the three most recent backups. Restoring replaces current local data; downloaded files are retained.
 
@@ -73,7 +73,7 @@ Translation runs only when you request it. Selected titles and page text encount
 - Topics, your queue, source configurations, settings, and saved browsing/download records stay on your device. The app does not upload your creation queue or require an account.
 - Collection contacts the enabled sources; opening a page contacts that website. Optional translation sends the selected title or visible page text to the configured model service.
 - API keys are encrypted locally and are never exposed to pages.
-- Website sessions use temporary storage. You can disable saved browsing history and clear local browsing/download records from the reader; clearing download records does not delete downloaded files.
+- Reading tabs share a temporary website session while the app is running, including after closing and reopening a tab. Other website data is discarded when you clear site data or exit the app. Login cookies are encrypted locally and restored when you reopen a tab or restart the app. Cookies without a website expiry are remembered for up to 30 days. Clearing cookies removes remembered logins from all tabs; website expiry or revocation may still require signing in again. The app does not save or autofill passwords. You can disable saved browsing history and clear local browsing/download records from the reader; clearing download records does not delete downloaded files.
 
 Topic Desk Studio is the standalone desktop edition of [dsh-topic-desk](https://github.com/microai-lab/dsh-topic-desk).
 

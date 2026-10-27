@@ -240,7 +240,7 @@ impl<'connection> TopicRepository<'connection> {
         page_values.push(limit_value);
         page_values.push(offset_value);
         let mut statement = self.connection.prepare(&format!(
-            "SELECT t.id, p.code, p.display_name, t.title, t.canonical_url, t.published_time,
+            "SELECT t.id, p.code, p.display_name, t.title, COALESCE((SELECT url FROM topic_reading_link WHERE topic_id=t.id), t.canonical_url), t.published_time,
                     t.rank, t.heat, t.create_time, t.update_time,
                     ROW_NUMBER() OVER (ORDER BY t.rank ASC, p.code ASC, t.id ASC),
                     CASE WHEN cq.id IS NULL THEN 0 ELSE 1 END, cq.create_time, p.category
@@ -958,6 +958,17 @@ impl<'connection> TopicRepository<'connection> {
                     stats.inserted_topic_ids.push(id);
                     id
                 };
+            // A newly observed signed reading link repairs old bare links without
+            // changing the first title/URL, stable identity or publication metadata.
+            if platform.code == "xiaohongshu" {
+                if let Some(url) = topic
+                    .stable_id
+                    .as_deref()
+                    .and_then(|id| crate::xiaohongshu::signed_note_link(&topic.url, id))
+                {
+                    transaction.execute("INSERT INTO topic_reading_link(topic_id,url) VALUES(?1,?2) ON CONFLICT(topic_id) DO UPDATE SET url=excluded.url", params![topic_id, url])?;
+                }
+            }
             transaction.execute(
                 "INSERT INTO topic_observation (
                    topic_id, collection_run_id, rank, heat, create_time, update_time
@@ -1376,6 +1387,81 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ithome", "hackernews", "qbitai", "sspai"]
         );
+    }
+
+    #[test]
+    fn signed_xiaohongshu_reading_links_refresh_without_rewriting_first_seen_metadata() {
+        let connection = fixture();
+        connection
+            .execute("UPDATE platform SET code='xiaohongshu'", [])
+            .unwrap();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let id = "0123456789abcdef01234567";
+        let original = format!("https://www.xiaohongshu.com/explore/{id}");
+        let mut topic = CollectedTopic {
+            platform_code: "xiaohongshu".into(),
+            stable_id: Some(id.into()),
+            title: "First title".into(),
+            url: original.clone(),
+            published_time: Some("2026-10-27T00:00:00Z".into()),
+            rank: 1,
+            heat: None,
+        };
+        let feed = |topic: CollectedTopic| ParsedFeed {
+            topics: vec![topic],
+            fetched_count: 1,
+            invalid_count: 0,
+        };
+        let run = repository.create_run(platform.id, "manual").unwrap();
+        repository
+            .commit_feed(&platform, run, &feed(topic.clone()))
+            .unwrap();
+        let initial = repository
+            .list(&TopicQuery::default())
+            .unwrap()
+            .topics
+            .remove(0);
+        for access in ["first-access", "updated-access"] {
+            topic.url = format!("{original}?xsec_token={access}&xsec_source=pc_feed");
+            topic.title = "Later title".into();
+            topic.published_time = None;
+            let run = repository.create_run(platform.id, "manual").unwrap();
+            let stats = repository
+                .commit_feed(&platform, run, &feed(topic.clone()))
+                .unwrap();
+            assert_eq!(stats.inserted, 0);
+            assert_eq!(stats.updated, 1);
+            let page = repository.list(&TopicQuery::default()).unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.topics[0].id, initial.id);
+            assert_eq!(page.topics[0].title, "First title");
+            assert_eq!(page.topics[0].first_seen_at, initial.first_seen_at);
+            assert_eq!(page.topics[0].published_time, initial.published_time);
+            assert!(page.topics[0].url.contains(access));
+            let stored: String = connection
+                .query_row(
+                    "SELECT canonical_url FROM topic WHERE id=?1",
+                    [initial.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, original);
+        }
+        // A later unsigned card or a forged off-site link must not erase the last valid reading address.
+        for url in [
+            original.clone(),
+            format!("https://evil.org/explore/{id}?xsec_token=forged"),
+        ] {
+            topic.url = url;
+            let run = repository.create_run(platform.id, "manual").unwrap();
+            repository
+                .commit_feed(&platform, run, &feed(topic.clone()))
+                .unwrap();
+            assert!(repository.list(&TopicQuery::default()).unwrap().topics[0]
+                .url
+                .contains("updated-access"));
+        }
     }
 
     /// Feed commits must populate current topics, observations and run counters together.

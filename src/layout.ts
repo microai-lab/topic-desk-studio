@@ -25,3 +25,11 @@ export function sidebarNavigationPlan(settings: boolean, workspaceWidth: number,
     : Number.isFinite(viewportWidth) && viewportWidth > 1000
   return { expanded: false, hideBrowser: !settings && !canSplit } as const
 }
+
+/** A captured pointer can survive sleep or a lost mouse-up. Resize only while
+ * the initiating pointer still holds the primary button and geometry is valid. */
+export function readerDragWidth(activePointer: number | null, pointer: number, buttons: number, clientX: number, right: number, width: number): number | undefined {
+  if (activePointer === null || activePointer !== pointer || (buttons & 1) === 0
+    || ![clientX, right, width].every(Number.isFinite) || width <= 0) return undefined
+  return clampReaderWidth((right - clientX) / width * 100)
+}

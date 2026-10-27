@@ -387,29 +387,30 @@ unsafe impl Send for MainThreadWebviewConfiguration {}
 /// WebKit's private delegate hook is runtime-checked because it arrived in macOS 15.
 #[cfg(target_os = "macos")]
 fn article_webview_configuration_on_main() -> Result<Retained<WKWebViewConfiguration>, String> {
-    use std::ffi::c_void;
-
-    static DELEGATE_ASSOCIATION_KEY: u8 = 0;
     let mtm = MainThreadMarker::new().ok_or("浏览器配置必须在主线程创建")?;
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-    let data_store = unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+    let data_store = crate::desktop_sessions_macos::shared_store(|| {
+        use std::ffi::c_void;
+        static DELEGATE_ASSOCIATION_KEY: u8 = 0;
+        let data_store = unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+        if !data_store.respondsToSelector(objc2::sel!(set_delegate:)) {
+            return Err("当前 macOS WebKit 无法隔离浏览器加密密钥".into());
+        }
+        let delegate = EphemeralWebCryptoDelegate::new(mtm);
+        unsafe {
+            let _: () = msg_send![&*data_store, set_delegate: &*delegate];
+            // The WebKit SPI keeps only a weak delegate. Associate it strongly
+            // with the temporary store so both have exactly the same lifetime.
+            objc_setAssociatedObject(
+                Retained::as_ptr(&data_store) as *mut AnyObject,
+                (&DELEGATE_ASSOCIATION_KEY as *const u8).cast::<c_void>(),
+                Retained::as_ptr(&delegate) as *mut AnyObject,
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+            );
+        }
+        Ok(data_store)
+    })?;
     unsafe { configuration.setWebsiteDataStore(&data_store) };
-
-    if !data_store.respondsToSelector(objc2::sel!(set_delegate:)) {
-        return Err("当前 macOS WebKit 无法隔离浏览器加密密钥".into());
-    }
-    let delegate = EphemeralWebCryptoDelegate::new(mtm);
-    unsafe {
-        let _: () = msg_send![&*data_store, set_delegate: &*delegate];
-        // The WebKit SPI keeps only a weak delegate. Associate it strongly
-        // with the temporary store so both have exactly the same lifetime.
-        objc_setAssociatedObject(
-            Retained::as_ptr(&data_store) as *mut AnyObject,
-            (&DELEGATE_ASSOCIATION_KEY as *const u8).cast::<c_void>(),
-            Retained::as_ptr(&delegate) as *mut AnyObject,
-            OBJC_ASSOCIATION_RETAIN_NONATOMIC,
-        );
-    }
     Ok(configuration)
 }
 
@@ -751,6 +752,7 @@ pub fn browser_request(
             }
             for (label, view) in app.webviews() {
                 if label.starts_with("article-") {
+                    crate::desktop_sessions::capture_before_close(app, &view)?;
                     view.close().map_err(|error| error.to_string())?;
                 }
             }
@@ -767,6 +769,9 @@ pub fn browser_request(
         "close" => {
             let tab_id = tab_id.as_deref().ok_or("缺少浏览器标签页")?;
             let label = tab_label(tab_id)?;
+            if let Some(view) = app.get_webview(&label) {
+                crate::desktop_sessions::capture_before_close(app, &view)?;
+            }
             {
                 let profile = app.state::<BrowserProfile>();
                 let mut session = profile.inner.lock().map_err(|e| e.to_string())?;
@@ -845,6 +850,8 @@ pub fn browser_request(
                 }
                 Ok(())
             } else if let Some(url) = parsed {
+                crate::desktop_sessions::capture_all(app)?;
+                let initial_url = url.clone();
                 let popup_app = app.clone();
                 let title_tab = tab_id.to_string();
                 let page_tab = tab_id.to_string();
@@ -867,200 +874,201 @@ pub fn browser_request(
                     VecDeque<(Option<i64>, PathBuf)>,
                 >::new()));
                 let download_paths = pending_downloads.clone();
-                let builder = WebviewBuilder::new(label, WebviewUrl::External(url))
-                    // Ephemeral article views must never create WebCrypto or password material
-                    // in the operating-system credential store.
-                    .incognito(true)
-                    // Run the storage isolation in every frame because third-party
-                    // embeds can otherwise open their own persistent database.
-                    .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
-                    .on_navigation(is_article_url)
-                    .on_document_title_changed(move |view, title| {
-                        browser_profile::title_changed(view.app_handle(), &title_tab, title)
-                    })
-                    .on_page_load(move |view, payload| {
-                        // WebKit navigation callbacks can include child frames.
-                        // Reading the WebView itself yields the canonical top URL.
-                        let Ok(current) = view.url() else {
-                            return;
-                        };
-                        // Child-frame events must not restart the top-level spinner.
-                        if payload.url() != &current {
-                            return;
-                        }
-                        match payload.event() {
-                            PageLoadEvent::Started => {
-                                if let Some((generation, previous_origin)) =
-                                    browser_profile::navigated(
-                                        view.app_handle(),
-                                        &page_tab,
-                                        current.as_str(),
-                                    )
-                                {
-                                    watch_document_readiness(
-                                        view.clone(),
-                                        page_tab.clone(),
-                                        current.to_string(),
-                                        generation,
-                                        previous_origin,
-                                    );
-                                }
-                                // Let WebKit paint the response progressively instead of
-                                // withholding usable content until every slow subresource
-                                // finishes. The trusted React chrome keeps showing its
-                                // loading indicator above the child view.
-                                let active = view
-                                    .app_handle()
-                                    .state::<BrowserProfile>()
-                                    .inner
-                                    .lock()
-                                    .ok()
-                                    .is_some_and(|session| {
-                                        session.active_tab.as_deref() == Some(&page_tab)
-                                    });
-                                if active {
-                                    let _ = view.show();
-                                }
-                            }
-                            PageLoadEvent::Finished => {
-                                browser_profile::page_finished(
-                                    view.app_handle(),
-                                    &page_tab,
-                                    current.as_str(),
+                let builder = WebviewBuilder::new(
+                    label,
+                    WebviewUrl::External("about:blank".parse().expect("static blank URL")),
+                )
+                // Ephemeral article views must never create WebCrypto or password material
+                // in the operating-system credential store.
+                .incognito(true)
+                // Run the storage isolation in every frame because third-party
+                // embeds can otherwise open their own persistent database.
+                .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
+                .on_navigation(is_article_url)
+                .on_document_title_changed(move |view, title| {
+                    browser_profile::title_changed(view.app_handle(), &title_tab, title)
+                })
+                .on_page_load(move |view, payload| {
+                    // WebKit navigation callbacks can include child frames.
+                    // Reading the WebView itself yields the canonical top URL.
+                    let Ok(current) = view.url() else {
+                        return;
+                    };
+                    // Child-frame events must not restart the top-level spinner.
+                    if payload.url() != &current {
+                        return;
+                    }
+                    match payload.event() {
+                        PageLoadEvent::Started => {
+                            if let Some((generation, previous_origin)) = browser_profile::navigated(
+                                view.app_handle(),
+                                &page_tab,
+                                current.as_str(),
+                            ) {
+                                watch_document_readiness(
+                                    view.clone(),
+                                    page_tab.clone(),
+                                    current.to_string(),
+                                    generation,
+                                    previous_origin,
                                 );
-                                let (muted, active) = view
-                                    .app_handle()
-                                    .state::<BrowserProfile>()
-                                    .inner
-                                    .lock()
-                                    .ok()
-                                    .map(|session| {
-                                        (
-                                            session
-                                                .tabs
-                                                .get(&page_tab)
-                                                .is_some_and(|tab| tab.status.muted),
-                                            session.active_tab.as_deref() == Some(&page_tab),
-                                        )
-                                    })
-                                    .unwrap_or((false, false));
-                                let _ = apply_media_muting(&view, muted);
-                                if active {
-                                    let _ = view.show();
-                                }
+                            }
+                            // Let WebKit paint the response progressively instead of
+                            // withholding usable content until every slow subresource
+                            // finishes. The trusted React chrome keeps showing its
+                            // loading indicator above the child view.
+                            let active = view
+                                .app_handle()
+                                .state::<BrowserProfile>()
+                                .inner
+                                .lock()
+                                .ok()
+                                .is_some_and(|session| {
+                                    session.active_tab.as_deref() == Some(&page_tab)
+                                });
+                            if active {
+                                let _ = view.show();
                             }
                         }
-                    })
-                    .on_download(move |view, event| {
-                        match event {
-                            DownloadEvent::Requested { url, destination } => {
-                                if !is_article_url(&url) {
-                                    return false;
-                                }
-                                let Ok(directory) = view.app_handle().path().download_dir() else {
-                                    return false;
-                                };
-                                let name = destination
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy();
-                                let name: String = name
-                                    .chars()
-                                    .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':'))
-                                    .take(160)
-                                    .collect();
-                                *destination = directory.join(format!(
-                                    "{}-{}",
-                                    browser_profile::now(),
-                                    if name.is_empty() { "download" } else { &name }
-                                ));
-                                let record_id = browser_profile::start_download(
-                                    view.app_handle(),
-                                    url.as_str(),
-                                    destination,
-                                )
-                                .ok();
-                                if let Ok(mut pending) = download_paths.lock() {
-                                    pending
-                                        .entry(url.to_string())
-                                        .or_default()
-                                        .push_back((record_id, destination.clone()));
-                                }
+                        PageLoadEvent::Finished => {
+                            crate::desktop_sessions::page_finished(view.app_handle());
+                            browser_profile::page_finished(
+                                view.app_handle(),
+                                &page_tab,
+                                current.as_str(),
+                            );
+                            let (muted, active) = view
+                                .app_handle()
+                                .state::<BrowserProfile>()
+                                .inner
+                                .lock()
+                                .ok()
+                                .map(|session| {
+                                    (
+                                        session
+                                            .tabs
+                                            .get(&page_tab)
+                                            .is_some_and(|tab| tab.status.muted),
+                                        session.active_tab.as_deref() == Some(&page_tab),
+                                    )
+                                })
+                                .unwrap_or((false, false));
+                            let _ = apply_media_muting(&view, muted);
+                            if active {
+                                let _ = view.show();
                             }
-                            DownloadEvent::Finished { url, path, success } => {
-                                let finishing_id = current_finished_native_download();
-                                let pending_download =
-                                    download_paths.lock().ok().and_then(|mut pending| {
-                                        let download =
-                                            pending.get_mut(url.as_str()).and_then(|queue| {
-                                                finishing_id
-                                                    .and_then(|id| {
-                                                        queue
-                                                            .iter()
-                                                            .position(|(record_id, _)| {
-                                                                *record_id == Some(id)
-                                                            })
-                                                            .and_then(|index| queue.remove(index))
-                                                    })
-                                                    .or_else(|| queue.pop_front())
-                                            });
-                                        if pending.get(url.as_str()).is_some_and(VecDeque::is_empty)
-                                        {
-                                            pending.remove(url.as_str());
-                                        }
-                                        download
-                                    });
-                                if let Some((record_id, fallback)) = pending_download {
-                                    let path = path.as_deref().unwrap_or(&fallback);
-                                    if let Some(record_id) = record_id {
-                                        browser_profile::finish_download(
-                                            view.app_handle(),
-                                            record_id,
-                                            path,
-                                            success,
-                                        );
-                                    } else {
-                                        browser_profile::record_download(
-                                            view.app_handle(),
-                                            url.as_str(),
-                                            path,
-                                            if success { "complete" } else { "failed" },
-                                        );
+                        }
+                    }
+                })
+                .on_download(move |view, event| {
+                    match event {
+                        DownloadEvent::Requested { url, destination } => {
+                            if !is_article_url(&url) {
+                                return false;
+                            }
+                            let Ok(directory) = view.app_handle().path().download_dir() else {
+                                return false;
+                            };
+                            let name = destination
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            let name: String = name
+                                .chars()
+                                .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':'))
+                                .take(160)
+                                .collect();
+                            *destination = directory.join(format!(
+                                "{}-{}",
+                                browser_profile::now(),
+                                if name.is_empty() { "download" } else { &name }
+                            ));
+                            let record_id = browser_profile::start_download(
+                                view.app_handle(),
+                                url.as_str(),
+                                destination,
+                            )
+                            .ok();
+                            if let Ok(mut pending) = download_paths.lock() {
+                                pending
+                                    .entry(url.to_string())
+                                    .or_default()
+                                    .push_back((record_id, destination.clone()));
+                            }
+                        }
+                        DownloadEvent::Finished { url, path, success } => {
+                            let finishing_id = current_finished_native_download();
+                            let pending_download =
+                                download_paths.lock().ok().and_then(|mut pending| {
+                                    let download =
+                                        pending.get_mut(url.as_str()).and_then(|queue| {
+                                            finishing_id
+                                                .and_then(|id| {
+                                                    queue
+                                                        .iter()
+                                                        .position(|(record_id, _)| {
+                                                            *record_id == Some(id)
+                                                        })
+                                                        .and_then(|index| queue.remove(index))
+                                                })
+                                                .or_else(|| queue.pop_front())
+                                        });
+                                    if pending.get(url.as_str()).is_some_and(VecDeque::is_empty) {
+                                        pending.remove(url.as_str());
                                     }
-                                } else if let Some(path) = path {
+                                    download
+                                });
+                            if let Some((record_id, fallback)) = pending_download {
+                                let path = path.as_deref().unwrap_or(&fallback);
+                                if let Some(record_id) = record_id {
+                                    browser_profile::finish_download(
+                                        view.app_handle(),
+                                        record_id,
+                                        path,
+                                        success,
+                                    );
+                                } else {
                                     browser_profile::record_download(
                                         view.app_handle(),
                                         url.as_str(),
-                                        &path,
+                                        path,
                                         if success { "complete" } else { "failed" },
                                     );
                                 }
+                            } else if let Some(path) = path {
+                                browser_profile::record_download(
+                                    view.app_handle(),
+                                    url.as_str(),
+                                    &path,
+                                    if success { "complete" } else { "failed" },
+                                );
                             }
-                            _ => (),
                         }
-                        true
-                    })
-                    .on_new_window(move |url, _| {
-                        // WebKit creates an allowed popup with the caller's
-                        // configuration, preserving the non-persistent data
-                        // store and opener relationship required by Baidu's
-                        // verification callback. It remains isolated from all
-                        // Tauri capabilities.
-                        if is_baidu_verification_url(&url) {
-                            return NewWindowResponse::Allow;
-                        }
-                        // Returning `Deny` cancels the popup navigation. Route the
-                        // validated URL through the trusted main view afterward so
-                        // the existing article view can navigate normally.
-                        if is_article_url(&url) {
-                            let _ = popup_app.emit_to(
-                                EventTarget::webview("main"),
-                                "browser-open-popup",
-                                serde_json::json!({"tabId":popup_tab,"url":url.as_str()}),
-                            );
-                        }
-                        NewWindowResponse::Deny
-                    });
+                        _ => (),
+                    }
+                    true
+                })
+                .on_new_window(move |url, _| {
+                    // WebKit creates an allowed popup with the caller's
+                    // configuration, preserving the non-persistent data
+                    // store and opener relationship required by Baidu's
+                    // verification callback. It remains isolated from all
+                    // Tauri capabilities.
+                    if is_baidu_verification_url(&url) {
+                        return NewWindowResponse::Allow;
+                    }
+                    // Returning `Deny` cancels the popup navigation. Route the
+                    // validated URL through the trusted main view afterward so
+                    // the existing article view can navigate normally.
+                    if is_article_url(&url) {
+                        let _ = popup_app.emit_to(
+                            EventTarget::webview("main"),
+                            "browser-open-popup",
+                            serde_json::json!({"tabId":popup_tab,"url":url.as_str()}),
+                        );
+                    }
+                    NewWindowResponse::Deny
+                });
                 #[cfg(target_os = "macos")]
                 let builder =
                     builder.with_webview_configuration(article_webview_configuration(app)?);
@@ -1071,7 +1079,14 @@ pub fn browser_request(
                     .map_err(|error| error.to_string())?;
                 #[cfg(target_os = "macos")]
                 install_native_download_hooks()?;
-                view.set_zoom(zoom).map_err(|error| error.to_string())
+                view.set_zoom(zoom).map_err(|error| error.to_string())?;
+                if let Err(error) =
+                    crate::desktop_sessions::restore_and_navigate(app, &view, initial_url)
+                {
+                    let _ = view.close();
+                    return Err(error);
+                }
+                Ok(())
             } else {
                 Ok(())
             }

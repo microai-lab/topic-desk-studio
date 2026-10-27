@@ -167,4 +167,9 @@ CREATE INDEX idx_collection_run_platform_status_end ON collection_run (platform_
 CREATE INDEX idx_creation_queue_active_time ON creation_queue (deleted, create_time DESC, id DESC);
 CREATE INDEX idx_recent_addition_topic_id ON recent_addition_topic (topic_id, batch_id DESC);
 
-PRAGMA user_version = 11;
+-- Reading access can rotate without modifying a topic's first-observed canonical URL.
+CREATE TABLE topic_reading_link (
+  topic_id INTEGER PRIMARY KEY REFERENCES topic(id) ON DELETE CASCADE,
+  url TEXT NOT NULL
+);
+PRAGMA user_version = 12;

@@ -837,12 +837,12 @@ h1 {
 }
 .network-setting label { display: grid; gap: 6px; }
 .network-setting label > span { color: var(--ink); font-size: 12.5px; font-weight: 550; }
-.network-setting input {
+.network-setting input, .network-setting select {
   width: 100%; height: 42px; padding: 0 12px;
   border: 1px solid var(--border); border-radius: 9px;
   color: var(--ink); background: var(--surface-2); font-size: 13.5px; outline: none;
 }
-.network-setting input:focus {
+.network-setting input:focus, .network-setting select:focus {
   border-color: var(--accent); background: var(--surface);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
@@ -1156,3 +1156,16 @@ button.browser-download-copy:disabled { cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .desk-workspace, .topbar-search, .topbar-search input { transition: none; }
 }
+
+/* Editable proxy presets occupy one field; the menu does not shift the settings form. */
+.proxy-address-field { display: grid; gap: 6px; }
+.proxy-address-field > label { color: var(--ink); font-size: 12.5px; font-weight: 550; }
+.proxy-combobox { position: relative; }
+.network-setting .proxy-combobox input { padding-right: 44px; }
+.proxy-preset-toggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 40px; display: grid; place-items: center; border: 0; border-radius: 0 8px 8px 0; color: var(--muted); background: transparent; cursor: pointer; }
+.proxy-preset-toggle svg { width: 16px; height: 16px; }
+.proxy-preset-toggle:hover { color: var(--accent); background: var(--accent-dim); }
+.proxy-preset-options { position: absolute; z-index: 5; top: calc(100% + 5px); left: 0; right: 0; padding: 4px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); box-shadow: 0 8px 24px #0002; }
+.proxy-preset-options [role="option"] { padding: 9px 10px; border-radius: 6px; font-size: 13px; overflow-wrap: anywhere; cursor: pointer; }
+.proxy-preset-options [aria-selected="true"] { color: var(--accent); }
+.proxy-preset-options .highlighted { background: var(--accent-dim); }

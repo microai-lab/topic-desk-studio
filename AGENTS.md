@@ -43,6 +43,8 @@
 - Database migrations must successfully encrypt legacy credentials before removing the plaintext structure within the same transaction. If migration fails, preserve the old data and schema version; partial migration states are prohibited.
 - The application must not access the operating system Keychain, Credential Manager, or Secret Service, and must not provide browser password saving, importing, or autofill capabilities.
 - The built-in article-reading WebView must use temporary data storage and must not create persistent WebCrypto master keys or website password material.
+- Login persistence may retain only native HTTP cookies in a separate authenticated encrypted vault. Restore cookies before external navigation, preserve domain/path/Secure/HttpOnly/SameSite/expiry, and exclude them from topic/browser history backups. Never persist localStorage, IndexedDB, passwords, or WebCrypto keys. Clearing cookies must clear both the vault and all live reading views without a background snapshot resurrecting deleted sessions.
+- Within one desktop run, reading tabs must reuse the same temporary website context. Restore encrypted cookies only when that context is first created; never replay stale disk cookies into a live shared context. Clearing website data must replace the temporary context as well as closing its views.
 - Version 5 model ciphertext encrypted with a legacy system credential-store master key must no longer be read. During upgrade, clear that ciphertext and require the user to enter the API key again.
 
 ## Documentation Boundaries

@@ -135,6 +135,9 @@ pub fn restore_latest(
         } else if live_key.is_file() {
             fs::remove_file(&live_key)?;
         }
+        // Older backups must gain current reading-link support before queries
+        // resume; a failed migration still rolls both databases and the key back.
+        crate::database::upgrade_restored(topic, &live_key)?;
         Ok(())
     })();
     if let Err(error) = restored {
@@ -279,7 +282,12 @@ mod tests {
             )
             .unwrap();
 
+        // Regression: restore a pre-reading-link snapshot into the current app.
+        topic
+            .execute_batch("DROP TABLE topic_reading_link; PRAGMA user_version=11;")
+            .unwrap();
         backup(&root, &topic, &browser).expect("backup should succeed");
+        crate::database::upgrade_restored(&mut topic, &root.join(MASTER_KEY_FILE)).unwrap();
         topic
             .execute(
                 "UPDATE app_setting SET value = 'after' WHERE key = 'test-value'",
@@ -301,6 +309,11 @@ mod tests {
             .unwrap();
         assert_eq!(value, "before");
         assert_eq!(records, 1);
+        assert!(topic.prepare("SELECT url FROM topic_reading_link").is_ok());
+        let version: i64 = topic
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
         drop(topic);
         drop(browser);
         fs::remove_dir_all(root).unwrap();

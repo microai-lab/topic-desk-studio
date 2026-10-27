@@ -2,6 +2,7 @@
 
 mod browser_control;
 mod browser_profile;
+mod browser_sessions;
 mod catalog;
 mod collector;
 mod commands;
@@ -9,12 +10,18 @@ mod credential_cipher;
 mod data_directory;
 mod database;
 mod desktop;
+mod desktop_sessions;
+#[cfg(target_os = "macos")]
+mod desktop_sessions_macos;
 mod error;
 mod identity;
 mod models;
 mod repository;
+#[cfg(any(target_os = "macos", test))]
+mod session_context;
 mod storage;
 mod translator;
+mod xiaohongshu;
 
 use commands::{
     backup_storage, browser_request, collect_xiaohongshu_session, delete_source,
@@ -39,6 +46,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = data_directory::prepare(app.handle())?;
+            desktop_sessions::install(app.handle(), &data_dir)?;
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
             let database_path = data_dir.join("topic-desk.sqlite");
             let database =
@@ -133,6 +141,47 @@ pub fn run() {
             browser_request,
             browser_control::browser_control
         ])
-        .run(tauri::generate_context!())
-        .expect("Topic Desk Studio failed to start");
+        .build(tauri::generate_context!())
+        .expect("Topic Desk Studio failed to start")
+        .run(|app, event| {
+            // Cookie APIs can deadlock on the UI thread (especially WebView2).
+            // Keep the event loop alive until the worker finishes its final snapshot.
+            match event {
+                tauri::RunEvent::ExitRequested { api, code, .. } => {
+                    if !app
+                        .state::<desktop_sessions::BrowserLoginSessions>()
+                        .exiting
+                        .swap(true, Ordering::AcqRel)
+                    {
+                        api.prevent_exit();
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = desktop_sessions::capture_all(&app);
+                            app.exit(code.unwrap_or(0));
+                        });
+                    }
+                }
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::CloseRequested { api, .. },
+                    ..
+                } if label == "main"
+                    && !app
+                        .state::<desktop_sessions::BrowserLoginSessions>()
+                        .closing_window
+                        .swap(true, Ordering::AcqRel) =>
+                {
+                    api.prevent_close();
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        let _ = desktop_sessions::capture_all(&app);
+                        if let Some(window) = app.get_window("main") {
+                            let _ = window.close();
+                        }
+                    });
+                }
+
+                _ => {}
+            }
+        });
 }

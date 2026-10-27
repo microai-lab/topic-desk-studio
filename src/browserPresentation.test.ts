@@ -1,7 +1,7 @@
 /** Regression tests for browser chrome state, trusted domains and bounded controls. */
 
-import { describe, expect, it } from 'vitest'
-import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, pageTranslationRequest, parseDownloadDetail, runBrowserNavigation } from './browserPresentation'
+import { describe, expect, it, vi } from 'vitest'
+import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation } from './browserPresentation'
 
 describe('runBrowserNavigation', () => {
   it('keeps a completion received before command resolution instead of restarting loading', async () => {
@@ -64,6 +64,11 @@ describe('bounded browser controls', () => {
 })
 
 describe('pageTranslationRequest', () => {
+  it('toggles an active translation back to the original, including pending or failed paragraphs', () => {
+    const settings = { searchEngine: 'bing', zoom: 1, rememberHistory: true, translationLanguage: 'zh-CN' } as const
+    expect(pageTranslationRequest(settings, true)).toEqual({ kind: 'restorePageTranslation' })
+    expect(pageTranslationRequest(settings, false)).toEqual({ kind: 'translatePage', targetLanguage: 'zh-CN' })
+  })
   it('translates immediately with the language saved in browser settings', () => {
     expect(pageTranslationRequest({
       searchEngine: 'bing',
@@ -71,5 +76,46 @@ describe('pageTranslationRequest', () => {
       rememberHistory: true,
       translationLanguage: 'en',
     })).toEqual({ kind: 'translatePage', targetLanguage: 'en' })
+  })
+})
+
+describe('reader recovery after idle', () => {
+  it('resynchronizes unchanged geometry on focus, pageshow and visibility, then cleans up', () => {
+    const host = new EventTarget()
+    const page = Object.assign(new EventTarget(), { hidden: false })
+    const recover = vi.fn()
+    const stop = observeReaderRecovery(host as Window, page as unknown as Document, recover)
+    host.dispatchEvent(new Event('focus'))
+    host.dispatchEvent(new Event('pageshow'))
+    page.dispatchEvent(new Event('visibilitychange'))
+    expect(recover).toHaveBeenCalledTimes(3)
+    page.hidden = true
+    host.dispatchEvent(new Event('focus'))
+    page.dispatchEvent(new Event('visibilitychange'))
+    expect(recover).toHaveBeenCalledTimes(3)
+    page.hidden = false
+    page.dispatchEvent(new Event('visibilitychange'))
+    expect(recover).toHaveBeenCalledTimes(4)
+    stop()
+    host.dispatchEvent(new Event('focus'))
+    host.dispatchEvent(new Event('pageshow'))
+    page.dispatchEvent(new Event('visibilitychange'))
+    expect(recover).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('clearing remembered browser logins', () => {
+  it('clears before resetting tabs and reopening a fresh native session', async () => {
+    const calls: string[] = []
+    await runBrowserCookieClear(async () => { calls.push('clear') }, () => { calls.push('reset') }, async () => { calls.push('reopen') })
+    expect(calls).toEqual(['clear', 'reset', 'reopen'])
+  })
+  it('keeps current tabs when clearing fails and reports a failed reload after a successful clear', async () => {
+    const reset = vi.fn()
+    const reopen = vi.fn(async () => {})
+    await expect(runBrowserCookieClear(async () => { throw new Error('clear failed') }, reset, reopen)).rejects.toThrow('clear failed')
+    expect(reset).not.toHaveBeenCalled(); expect(reopen).not.toHaveBeenCalled()
+    await expect(runBrowserCookieClear(async () => {}, reset, async () => { throw new Error('reload failed') })).rejects.toThrow('reload failed')
+    expect(reset).toHaveBeenCalledTimes(1)
   })
 })

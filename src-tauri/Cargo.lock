@@ -4606,6 +4606,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "block2",
+ "cookie",
  "encoding_rs",
  "feed-rs",
  "futures-util",

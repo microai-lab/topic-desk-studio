@@ -11,6 +11,8 @@ import {
   reorderSourceConfigurations, restoreAllHiddenTopics, restoreDefaultSources, restoreHiddenTopic, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
   setTopicQueued, translateTopic,
 } from './api'
+import { ProxyAddressField } from './ProxyAddressField'
+import { DEFAULT_PROXY_URL } from './networkPresentation'
 import { BrowserPane } from './BrowserPane'
 import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
@@ -316,7 +318,7 @@ export function App() {
   const [modelProvider,   setModelProvider]      = useState<ModelProviderId>('deepseek')
   const [apiKey,          setApiKey]             = useState('')
   const [savingSettings,  setSavingSettings]     = useState(false)
-  const [proxyUrl,        setProxyUrl]           = useState('')
+  const [proxyUrl,        setProxyUrl]           = useState<string>(DEFAULT_PROXY_URL)
   const [savingNetwork,   setSavingNetwork]      = useState(false)
   const [storageStatus,   setStorageStatus]      = useState<StorageStatus>()
   const [storageAction,   setStorageAction]      = useState<StorageAction | null>(null)
@@ -1100,17 +1102,7 @@ export function App() {
               <div className="settings-page">
                 <header className="settings-page-header"><div><h2>{m.sectionNetwork}</h2><p>{m.settingsNetworkDesc}</p></div></header>
                 <div className="settings-surface network-setting">
-                  <label>
-                    <span>{m.labelProxy}</span>
-                    <input
-                      value={proxyUrl}
-                      onChange={(event) => setProxyUrl(event.target.value)}
-                      placeholder={m.proxyPlaceholder}
-                      spellCheck={false}
-                      autoComplete="off"
-                    />
-                  </label>
-                  <p>{m.proxyHelp}</p>
+                  <ProxyAddressField value={proxyUrl} onChange={setProxyUrl} m={m} />
                   <button className="primary-button" type="button" disabled={savingNetwork} onClick={() => void saveNetwork()}>
                     {savingNetwork ? m.btnSaving : m.btnSave}
                   </button>
@@ -1330,8 +1322,8 @@ export function App() {
         <div className="list-sticky-controls">
           <section className="filters" aria-label={m.filterSearch}>
             <FilterDropdown label={m.filterRegion} value={region} options={[{ value: 'all', label: m.filterAllRegions }, ...enabledSourceConfigs.some((item) => item.region === 'domestic') ? [{ value: 'domestic', label: m.filterDomestic }] : [], ...enabledSourceConfigs.some((item) => item.region === 'international') ? [{ value: 'international', label: m.filterInternational }] : []]} onChange={(value) => { setRegion(value as typeof region); setPageIndex(0) }} />
-            <FilterDropdown label={m.filterCategory} value={category} options={[{ value: 'all', label: m.filterAllCategories }, ...regionSourceConfigs.some((item) => item.category === 'general') ? [{ value: 'general', label: m.filterGeneral }] : [], ...regionSourceConfigs.some((item) => item.category === 'technology') ? [{ value: 'technology', label: m.filterTech }] : [], ...regionSourceConfigs.some((item) => item.category === 'finance') ? [{ value: 'finance', label: m.filterFinance }] : [], ...regionSourceConfigs.some((item) => item.category === 'developer') ? [{ value: 'developer', label: m.filterDev }] : []]} onChange={(value) => { setCategory(value as typeof category); setPageIndex(0) }} />
             <FilterDropdown label={m.filterSource} value={source} options={[{ value: 'all', label: m.filterAllSources }, ...linkedSourceConfigs.map((item) => ({ value: item.code, label: item.displayName, removable: true }))]} onChange={(value) => { setSource(value); setPageIndex(0) }} onRemove={(code) => changePlatform(code, false)} removeLabel={(option) => m.filterDisableSource(option.label)} />
+            <FilterDropdown label={m.filterCategory} value={category} options={[{ value: 'all', label: m.filterAllCategories }, ...regionSourceConfigs.some((item) => item.category === 'general') ? [{ value: 'general', label: m.filterGeneral }] : [], ...regionSourceConfigs.some((item) => item.category === 'technology') ? [{ value: 'technology', label: m.filterTech }] : [], ...regionSourceConfigs.some((item) => item.category === 'finance') ? [{ value: 'finance', label: m.filterFinance }] : [], ...regionSourceConfigs.some((item) => item.category === 'developer') ? [{ value: 'developer', label: m.filterDev }] : []]} onChange={(value) => { setCategory(value as typeof category); setPageIndex(0) }} />
             <FilterDropdown label={m.filterSort} value={sort} options={[{ value: 'rank', label: m.filterSortRank }, { value: 'updated', label: m.filterSortUpdated }]} onChange={(value) => { setSort(value as typeof sort); setPageIndex(0) }} />
           </section>
           <div className="results-heading">
