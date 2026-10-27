@@ -11,8 +11,10 @@ A desktop workspace for discovering trending topics, keeping a creation queue, a
 </p>
 
 <p>
-  <img src="./assets/topic-desk-studio-hero.png" alt="Topic Desk Studio promotional banner" width="100%" />
+  <a href="./assets/topic-desk-studio-hero.png"><img src="./assets/topic-desk-studio-hero.gif" alt="Topic Desk Studio demo: discover AI news across sources and switch from the original article to bilingual reading" width="100%" /></a>
 </p>
+
+<p align="center"><a href="./assets/topic-desk-studio-hero.png">View high-resolution screenshot</a></p>
 
 ## What you can do
 

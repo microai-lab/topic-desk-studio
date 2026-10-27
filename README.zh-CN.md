@@ -11,8 +11,10 @@
 </p>
 
 <p>
-  <img src="./assets/topic-desk-studio-hero.png" alt="Topic Desk Studio 宣传横幅" width="100%" />
+  <a href="./assets/topic-desk-studio-hero-zh.png"><img src="./assets/topic-desk-studio-hero-zh.gif" alt="Topic Desk Studio 动态演示：多来源 AI 选题与原文、中文译文对照阅读" width="100%" /></a>
 </p>
+
+<p align="center"><a href="./assets/topic-desk-studio-hero-zh.png">查看高清静态截图</a></p>
 
 ## 可以做什么
 

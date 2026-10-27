@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Editable README artwork: real application capture inside a lightweight product frame. -->
+<html lang="en"><meta charset="utf-8"><title>Topic Desk Studio — README artwork</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1600px;height:1280px;overflow:hidden}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#252438;background:#f5f4fb}.canvas{position:relative;width:1600px;height:1280px;background:radial-gradient(ellipse at 94% 3%,#e3defc 0,transparent 44%),radial-gradient(ellipse at 0 82%,#e9e6fb 0,transparent 47%),#f7f6fb;padding:58px 64px}.brand{display:flex;gap:14px;align-items:center;font-size:24px;font-weight:650;letter-spacing:-.6px}.mark{display:grid;place-items:center;background:#6255f5;color:white;border-radius:12px;width:48px;height:48px;font-size:19px;font-weight:800;letter-spacing:-1px}.platform{position:absolute;right:64px;top:76px;color:#726d86;font-size:16px;letter-spacing:.5px}.kicker{margin:36px 0 12px;color:#6b5bce;font-size:14px;letter-spacing:3px;font-weight:700}h1{margin:0;font-size:76px;line-height:1.1;letter-spacing:-3.4px;font-weight:720}.lead{margin:19px 0 0;font-size:23px;color:#747086;letter-spacing:-.35px}.window{position:absolute;top:332px;left:64px;width:1472px;border:1px solid #dcd8ed;border-radius:16px;overflow:hidden;background:white;box-shadow:0 32px 64px -30px #51448266,0 2px 8px #5144820b}.chrome{height:38px;background:#fbfaff;border-bottom:1px solid #e9e6f1;display:flex;align-items:center;justify-content:center;font-size:12px;color:#878196;letter-spacing:.4px;position:relative}.dots{display:flex;gap:7px;position:absolute;left:16px}.dots i{width:8px;height:8px;border-radius:50%;background:#d8d3e6}.dots i:first-child{background:#afa4e9}.screen{height:808px;overflow:hidden;position:relative}.screen img{width:1472px;display:block;position:relative;top:-31px}.features{position:absolute;left:66px;right:66px;bottom:43px;display:flex;align-items:center;justify-content:space-between}.feature{display:flex;align-items:center;gap:12px;font-size:18px;font-weight:550;color:#5c566f}.num{font-size:12px;font-weight:700;color:#8577c6;letter-spacing:1px}.local{font-size:13px;color:#8c869b;display:flex;align-items:center;gap:8px}.local:before{content:"";width:6px;height:6px;background:#8c80ce;border-radius:50%}html[lang=zh] h1{font-size:71px;letter-spacing:-1.5px}html[lang=zh] .lead{letter-spacing:.4px}
+</style>
+<div class="canvas">
+ <div class="brand"><span class="mark">TD</span>Topic Desk <span style="color:#8c849e;font-weight:400">Studio</span></div>
+ <div class="platform">macOS &nbsp; / &nbsp; Windows &nbsp; / &nbsp; Linux</div>
+ <p class="kicker" id="kicker">A DESKTOP WORKSPACE FOR CURIOUS MINDS</p>
+ <h1 id="title">Find your next idea.</h1>
+ <p class="lead" id="lead">Discover trends. Read in two languages. Keep everything in one workspace.</p>
+ <div class="window"><div class="chrome"><span class="dots"><i></i><i></i><i></i></span>Topic Desk Studio</div><div class="screen"><img src="topic-desk-studio-screenshot.png" alt="Actual Topic Desk Studio screenshot showing AI news from multiple sources and bilingual reading"></div></div>
+ <div class="features"><div class="feature"><span class="num">01</span><span id="f1">Discover across sources</span></div><div class="feature"><span class="num">02</span><span id="f2">Read side by side</span></div><div class="feature"><span class="num">03</span><span id="f3">Translate as you scroll</span></div><span class="local" id="local">Your workspace stays local</span></div>
+</div>
+<script>
+// Keep both README editions on the same layout and original screenshot.
+if(new URLSearchParams(location.search).get('lang')==='zh'){
+ document.documentElement.lang='zh';
+ const copy={kicker:'为好奇心而生的桌面工作区',title:'发现热点，留住下一个灵感。',lead:'多源选题 · 原文对照 · 随滚动翻译，让阅读与创作在一处发生。',f1:'多源发现',f2:'并排阅读',f3:'按需翻译',local:'工作区数据保存在本机'};
+ for(const [id,text] of Object.entries(copy))document.getElementById(id).textContent=text;
+}
+</script>
+</html>
