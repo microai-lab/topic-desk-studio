@@ -29,11 +29,11 @@ describe('appVersionLabel', () => {
     const tauri = JSON.parse(readFileSync(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'))
     const cargo = readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8')
     const lock = readFileSync(new URL('../src-tauri/Cargo.lock', import.meta.url), 'utf8')
-    expect(npm.version).toBe('0.3.3')
+    expect(npm.version).toBe('0.4.0')
     expect(tauri.version).toBe(npm.version)
     expect(cargo.match(/^version = "([^"]+)"/m)?.[1]).toBe(npm.version)
     expect(lock.match(/name = "topic-desk-studio"\nversion = "([^"]+)"/)?.[1]).toBe(npm.version)
-    expect(appVersionLabel(tauri.version)).toBe('v0.3.3')
+    expect(appVersionLabel(tauri.version)).toBe('v0.4.0')
     // The tagged-release workflow requires a matching bilingual body_path file.
     const notes = readFileSync(new URL(`../.github/release-notes/v${npm.version}.md`, import.meta.url), 'utf8')
     expect(notes).toContain(`# Topic Desk Studio v${npm.version} — English`)
