@@ -1,7 +1,7 @@
 /** Regression tests for browser chrome state, trusted domains and bounded controls. */
 
 import { describe, expect, it, vi } from 'vitest'
-import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+import { browserTabClosePlan, clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
 
 describe('runBrowserTabClose', () => {
   it('removes each tab only after native close finishes and ignores duplicate ids', async () => {
@@ -150,5 +150,44 @@ describe('clearing remembered browser logins', () => {
     expect(reset).not.toHaveBeenCalled(); expect(reopen).not.toHaveBeenCalled()
     await expect(runBrowserCookieClear(async () => {}, reset, async () => { throw new Error('reload failed') })).rejects.toThrow('reload failed')
     expect(reset).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+describe('workspace after closing browser tabs', () => {
+  it('restores topics when the final tab closes, including a collapsed-topic workspace', () => {
+    expect(browserTabClosePlan([{ id: 'last' }], 'last', 'last')).toEqual({
+      remaining: [], activeId: '', restoreTopics: true,
+    })
+  })
+
+  it('keeps reading mode for remaining tabs and selects the nearest tab', () => {
+    const tabs = [{ id: 'first' }, { id: 'middle' }, { id: 'last' }]
+    expect(browserTabClosePlan(tabs, 'middle', 'middle')).toEqual({
+      remaining: [tabs[0], tabs[2]], activeId: 'last', restoreTopics: false,
+    })
+    expect(browserTabClosePlan(tabs, 'last', 'last')?.activeId).toBe('middle')
+    expect(browserTabClosePlan(tabs, 'first', 'last')?.activeId).toBe('first')
+  })
+
+  it('restores topics only after all native closes succeed and ignores stale completions', async () => {
+    let tabs = [{ id: 'first' }, { id: 'last' }]
+    let activeId = 'first'
+    const restoration: boolean[] = []
+    await runBrowserTabClose(['first', 'last'], async () => {}, id => {
+      const plan = browserTabClosePlan(tabs, activeId, id)!
+      tabs = plan.remaining
+      activeId = plan.activeId
+      restoration.push(plan.restoreTopics)
+    }, vi.fn())
+    expect(restoration).toEqual([false, true])
+    expect(browserTabClosePlan([{ id: 'new' }], 'new', 'last')).toBeUndefined()
+    expect(browserTabClosePlan([], '', 'last')).toBeUndefined()
+  })
+
+  it('retains the collapsed reader if its last native tab fails to close', async () => {
+    const closed = vi.fn()
+    await runBrowserTabClose(['last'], async () => { throw new Error('native failure') }, closed, vi.fn())
+    expect(closed).not.toHaveBeenCalled()
   })
 })

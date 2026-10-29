@@ -192,13 +192,16 @@ export interface BrowserSettings { searchEngine: 'bing' | 'google' | 'duckduckgo
 export interface BrowserRecord { id: number; url: string; title: string; detail: string; time: number }
 /** Complete local library for browser management panels. */
 export interface BrowserLibrary { history: BrowserRecord[]; downloads: BrowserRecord[]; settings: BrowserSettings; downloadCancellation: boolean }
-/** Explicit requests keep browser functionality behind a typed native boundary. */
+/** Public display metadata for an unprivileged article overlay. */
+export interface TopicRailItem { readonly id: number; readonly title: string; readonly platformName: string; readonly url: string }
+/** Only public display metadata is shared with the unprivileged page overlay. */
 export type BrowserAction =
   | { kind: 'library' | 'print' | 'screenshot' }
   | { kind: 'navigate'; input: string }
   | { kind: 'find'; text: string; backwards: boolean; sensitive: boolean }
   | { kind: 'zoom'; factor: number }
   | { kind: 'overlay'; visible: boolean; capture?: boolean }
+  | { kind: 'topicRail'; tabId: string; topics: readonly TopicRailItem[]; active: number | null; locale: Locale; theme: 'light' | 'dark' | 'system'; visible: boolean }
   | { kind: 'settings'; settings: BrowserSettings }
   | { kind: 'clear'; history: boolean; cookies: boolean; downloads: boolean }
   | { kind: 'importCookies'; content: string }

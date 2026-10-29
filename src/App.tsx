@@ -14,6 +14,7 @@ import {
 import { ProxyAddressField } from './ProxyAddressField'
 import { DEFAULT_PROXY_URL } from './networkPresentation'
 import { BrowserPane } from './BrowserPane'
+import { browserTabClosePlan } from './browserPresentation'
 import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
 import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, sidebarNavigationPlan } from './layout'
@@ -22,7 +23,7 @@ import { SourceConnectionBatchTestButton, SourceConnectionTestButton, SourceConn
 import { SourceConnectionSummaryDialog } from './SourceConnectionSummaryDialog'
 import { matchingSourceConnectionState, runSourceConnectionBatch, runSourceConnectionTest, sourceConnectionKey, sourceHealthTone } from './sourceConnectionPresentation'
 import type { SourceConnectionBatchProgress, SourceConnectionTestState } from './sourceConnectionPresentation'
-import type { StorageAction } from './StorageConfirmation'
+import type { ConfirmationAction, StorageAction } from './StorageConfirmation'
 import type { BrowserTab } from './BrowserPane'
 import { parseStoredTimestamp, rankTrendPoints, shouldOfferTitleTranslation } from './presentation'
 import {
@@ -339,7 +340,7 @@ export function App() {
   const [savingNetwork,   setSavingNetwork]      = useState(false)
   const [storageStatus,   setStorageStatus]      = useState<StorageStatus>()
   const [storageAction,   setStorageAction]      = useState<StorageAction | null>(null)
-  const [pendingStorageAction, setPendingStorageAction] = useState<StorageAction | null>(null)
+  const [pendingStorageAction, setPendingStorageAction] = useState<ConfirmationAction | null>(null)
   const [hiddenTopics,    setHiddenTopics]       = useState<HiddenTopicView[]>()
   const [hiddenTopicsSearch, setHiddenTopicsSearch] = useState('')
   const [hiddenTopicsPage, setHiddenTopicsPage] = useState(0)
@@ -414,6 +415,11 @@ export function App() {
     if (browserCloseTimer.current) { clearTimeout(browserCloseTimer.current); browserCloseTimer.current = null }
     return id
   }, [activateBrowserTab, replaceBrowserTabs])
+
+  /** Overlay selections always create a new reading tab; payloads are HTTP(S)-validated natively. */
+  const openRailTopic = useCallback((topic: { id: number; title: string; url: string }): void => {
+    addBrowserTab({ url: topic.url, title: topic.title, topicId: topic.id, sourceUrl: topic.url })
+  }, [addBrowserTab])
 
   const closeBrowser = useCallback((): void => {
     if (browserCloseTimer.current) clearTimeout(browserCloseTimer.current)
@@ -528,17 +534,21 @@ export function App() {
   }, [replaceBrowserTabs])
 
   const closeBrowserTab = useCallback((id: string): void => {
-    const current = browserTabsRef.current
-    const index = current.findIndex((tab) => tab.id === id)
-    const next = current.filter((tab) => tab.id !== id)
-    replaceBrowserTabs(next)
+    const plan = browserTabClosePlan(browserTabsRef.current, activeBrowserTabIdRef.current, id)
+    if (plan === undefined) return
+    replaceBrowserTabs(plan.remaining)
     for (const [key, tabId] of topicTabIdsRef.current) {
       if (tabId === id) topicTabIdsRef.current.delete(key)
     }
-    if (activeBrowserTabIdRef.current === id) {
-      activateBrowserTab(next[Math.min(Math.max(index, 0), next.length - 1)]?.id ?? '')
+    if (activeBrowserTabIdRef.current === id) activateBrowserTab(plan.activeId)
+    if (plan.restoreTopics) {
+      // A hidden topic pane cannot remain the only workspace after its last reader closes.
+      if (browserCloseTimer.current) clearTimeout(browserCloseTimer.current)
+      browserCloseTimer.current = null
+      setBrowserOpen(false)
+      setBrowserClosing(false)
+      setReaderExpanded(false)
     }
-    if (next.length === 0) setBrowserOpen(false)
   }, [activateBrowserTab, replaceBrowserTabs])
 
   useEffect(() => {
@@ -817,7 +827,6 @@ export function App() {
   }
 
   const restoreSources = async (): Promise<void> => {
-    if (!window.confirm(m.sourceRestoreConfirm)) return
     setError(undefined)
     try {
       setSourceConfigs(await restoreDefaultSources())
@@ -1055,7 +1064,7 @@ export function App() {
         <label><span>{m.sourceParser}</span><select value={sourceDraft.parserType} disabled={sourceBuiltIn} onChange={(e) => updateSourceDraft({ parserType: e.target.value as SaveSourceConfiguration['parserType'], parserConfig: {} })}>{sourceBuiltIn ? <option value="builtin">{m.sourceBuiltIn}</option> : null}<option value="rss">RSS / Atom</option><option value="json">JSON</option><option value="html">HTML</option></select></label>
         <label><span>{m.filterRegion}</span><select value={sourceDraft.region} onChange={(e) => updateSourceDraft({ region: e.target.value as SourceRegion })}><option value="domestic">{m.regionDomestic}</option><option value="international">{m.regionIntl}</option></select></label>
         <label><span>{m.filterCategory}</span><select value={sourceDraft.category} onChange={(e) => updateSourceDraft({ category: e.target.value as TopicCategory })}><option value="general">{m.filterGeneral}</option><option value="technology">{m.filterTech}</option><option value="finance">{m.filterFinance}</option><option value="developer">{m.filterDev}</option></select></label>
-        <label><span>{m.sourceProxyMode}</span><select value={sourceDraft.proxyMode} onChange={(e) => updateSourceDraft({ proxyMode: e.target.value as SaveSourceConfiguration['proxyMode'] })}><option value="auto">{m.sourceAuto}</option><option value="direct">{m.sourceDirect}</option><option value="proxy">{m.sourceProxy}</option></select>{sourceDraft.proxyMode === 'auto' ? <small className="source-network-help">{m.sourceAutoHelp}</small> : null}</label>
+        <label><span>{m.sourceProxyMode}</span><select value={sourceDraft.proxyMode} onChange={(e) => updateSourceDraft({ proxyMode: e.target.value as SaveSourceConfiguration['proxyMode'] })}><option value="auto">{m.sourceAuto}</option><option value="direct">{m.sourceDirect}</option><option value="proxy">{m.sourceProxy}</option></select><small className="source-network-help">{m.sourceAutoHelp}</small></label>
       </div>
       {sourceDraft.parserType === 'json' ? <div className="source-parser-grid">
         {([['itemsPath', m.sourceItemsPath, 'data.items'], ['titlePath', m.sourceTitlePath, 'title'], ['urlPath', m.sourceUrlPath, 'url'], ['idPath', m.sourceIdPath, 'id'], ['publishedPath', m.sourcePublishedPath, 'publishedAt'], ['rankPath', m.sourceRankPath, 'rank'], ['heatPath', m.sourceHeatPath, 'score']] as const).map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={sourceDraft.parserConfig[key] ?? ''} placeholder={placeholder} onChange={(e) => updateParserConfig(key, e.target.value)} /></label>)}
@@ -1096,7 +1105,11 @@ export function App() {
         {sourceTestSummary !== undefined && pendingStorageAction === null ? <SourceConnectionSummaryDialog progress={sourceTestSummary} locale={locale} onClose={() => setSourceTestSummary(undefined)} /> : null}
         {pendingStorageAction !== null ? <StorageConfirmation action={pendingStorageAction} m={m}
           onCancel={() => setPendingStorageAction(null)}
-          onConfirm={() => { setPendingStorageAction(null); void runStorageAction(pendingStorageAction) }} /> : null}
+          onConfirm={() => {
+            setPendingStorageAction(null)
+            if (pendingStorageAction === 'restoreSources') void restoreSources()
+            else void runStorageAction(pendingStorageAction)
+          }} /> : null}
         <header className="settings-fs-header">
           <button className="back-button" type="button" onClick={() => switchView(prevView)}>
             <ArrowLeft aria-hidden="true" />{m.settingsBack}
@@ -1190,7 +1203,7 @@ export function App() {
                       onTest={() => void testAllSourceConfigurations()} />
                     <button type="button" onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
                     <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
-                    <button type="button" onClick={() => void restoreSources()}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
+                    <button type="button" onClick={() => setPendingStorageAction('restoreSources')}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
                     <button className="primary-button source-add-button" type="button" onClick={() => editSource()}><Plus aria-hidden="true" />{m.sourceAdd}</button>
                   </div>
                 </header>
@@ -1342,6 +1355,7 @@ export function App() {
   }
 
   // ── Normal view ──────────────────────────────────────────────────
+  const showTopicRail = readerExpanded && browserOpen && !browserClosing && workspaceWidth >= 780
   const viewTitle = view === 'discover' ? m.navDiscover : view === 'queue' ? m.navQueue : m.navNew
 
   return (
@@ -1353,6 +1367,7 @@ export function App() {
 
       <div className="workspace-frame" ref={workspaceFrame}>
       <div className={`desk-workspace${browserOpen ? ' reader-open' : ''}${readerExpanded ? ' reader-expanded' : ''}`} style={{ gridTemplateColumns: (browserOpen || browserClosing) ? topicColumns(topicWidth, workspaceWidth, readerExpanded) : undefined }}>
+
       <main id="topic-list-pane" className="topic-list-pane" aria-hidden={(browserOpen || browserClosing) && readerExpanded} inert={(browserOpen || browserClosing) && readerExpanded}>
         <header className="topbar">
           <div className="topbar-main">
@@ -1439,7 +1454,7 @@ export function App() {
           <button disabled={pageIndex + 1 >= totalPages} onClick={() => setPageIndex((v) => v + 1)}>{m.next}</button>
         </footer>
       </main>
-      {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} closing={browserClosing} topicWidth={clampTopicWidth(topicWidth, workspaceWidth)} topicMaxWidth={clampTopicWidth(Number.MAX_SAFE_INTEGER, workspaceWidth)}
+      {(browserOpen || browserClosing) && activeBrowserTabId ? <BrowserPane tabs={browserTabs} activeTabId={activeBrowserTabId} locale={locale} expanded={readerExpanded} topicRailVisible={showTopicRail} railTopics={page?.topics} theme={theme} onOpenRailTopic={openRailTopic} closing={browserClosing} topicWidth={clampTopicWidth(topicWidth, workspaceWidth)} topicMaxWidth={clampTopicWidth(Number.MAX_SAFE_INTEGER, workspaceWidth)}
         onActivate={activateBrowserTab} onNewTab={() => addBrowserTab()} onUpdateTab={updateBrowserTab} onCloseTab={closeBrowserTab}
         onMoveTab={moveBrowserTab} onPinTab={pinBrowserTab}
         onExpand={toggleTopicPane}

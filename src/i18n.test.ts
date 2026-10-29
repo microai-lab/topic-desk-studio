@@ -28,6 +28,12 @@ describe('proxy settings copy', () => {
     expect(messages.zh.sourceAutoHelp).toContain('已保存的代理')
     expect(messages.zh.sourceAutoHelp).toContain('连接失败')
     expect(messages.en.sourceAutoHelp).toContain('saved proxy')
+    expect(messages.zh.sourceDirect).toBe('优先直连')
+    expect(messages.zh.sourceProxy).toBe('优先代理')
+    expect(messages.en.sourceDirect).toBe('Prefer Direct')
+    expect(messages.en.sourceProxy).toBe('Prefer proxy')
+    expect(messages.zh.sourceAutoHelp).toContain('下一个来源')
+    expect(messages.en.sourceAutoHelp).toContain('next source')
   })
   it('removes the obsolete routing help text', () => {
     for (const locale of ['zh', 'en'] as const) {

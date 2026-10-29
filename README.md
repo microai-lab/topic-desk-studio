@@ -59,6 +59,8 @@ Built-in sources include Weibo, Zhihu, Bilibili, 36Kr, TechCrunch, The Verge, Go
 3. **Save what matters.** Click **Add to queue** to keep a topic for later, then revisit it in **Queue**.
 4. **Read the original.** Click a title to open it in the right-hand reader. Resize the pane, use **Hide topics** for focused reading, or open more tabs. **Show topics** restores the list and its previous width.
 
+Collapsed topics remain accessible through a narrow rail: hover or focus a marker to preview its title and source, then click to read in a new tab.
+
 Playing tabs show a speaker icon; click it to mute or unmute that tab, including background tabs. The reader also offers page search and download management. Open completed downloads or their folders; cancelling active downloads is supported on macOS.
 
 ## Read in two languages
@@ -68,6 +70,8 @@ Configure a model in **Settings → Translation**: choose a provider, then save 
 - **Article pages:** click the translation button in the reader toolbar. Translations appear beneath the original text, starting with visible content and continuing as you scroll. Click the same button again to return to the original.
 - **English titles:** click **Translate** on an eligible title to translate it into Simplified Chinese.
 - **Target language:** choose it in the reader’s **Browser settings**.
+
+The official DeepSeek API uses Direct first. If the connection cannot be established, it retries once through the proxy saved in **Settings → Network proxy**. Local models stay on Direct.
 
 Translation starts only when requested. It sends the selected title or page text encountered during translation to your configured model service, which may apply usage limits and charges.
 
@@ -86,9 +90,9 @@ When a source fails, use the questions and steps below to troubleshoot. Each sin
 
 1. **Save the actual proxy address.** In **Settings → Network proxy**, save the HTTP proxy address used by your running proxy app, with the correct port. Ports 7897 and 1082 are only presets; the app does not scan or switch ports automatically.
 2. **Start a test.** Use the connectivity icon on a source row, or **Test connectivity** for all sources. Check the actual **Direct or Proxy** route; a successful switch shows **Automatically switched**. Every test chooses afresh without changing source settings, topics, or collection history.
-3. **Save the collection setting if needed.** A passing test does not change how collection connects. To let collection switch automatically for QbitAI or another source, click its pencil **Edit** icon, set **Network route** to **Automatic**, and save. Collection still follows an explicit **Direct** or **Use proxy** choice.
+3. **Choose a preference if needed.** Manual and scheduled collection automatically try the selected route first, then the other available route after a connection failure. If both fail, collection records the error and continues to the next source. Source settings offer Automatic, Prefer Direct, and Prefer proxy; recovery needs no separate switch.
 
-**When does Automatic switch?** Testing starts with the source’s default route. Only a connection problem such as TLS (secure connection) failure, reset, timeout, or DNS (website address lookup) failure, together with a saved proxy address, triggers one attempt over the other route. HTTP 403 (access refused), 429 (too many requests), and invalid data do not trigger switching. Tests and collection in **Automatic** mode keep sources on this computer on Direct; collection explicitly set to **Use proxy** follows that choice. If it still fails, compare in a browser, try later, or share the source name, error, and test result.
+**When does recovery switch?** Collection starts with the saved preference; diagnostics start with the source default. TLS, connection reset, timeout, or DNS connection failures can trigger one attempt over the other route when a proxy is saved. HTTP 403, 429, and invalid data do not trigger switching. Local and private-network sources stay on Direct. Without a saved proxy, only Direct is attempted. Exhausted sources record an error without blocking other sources or changing saved settings.
 
 <details>
 <summary>View all 11 questions and next steps</summary>
@@ -99,7 +103,7 @@ Every single-source or batch connectivity test chooses a route afresh for that t
 
 1. In Settings → Network proxy, save the HTTP proxy address actually used by your proxy app. Check that the app is running and the port matches. Without a saved proxy address, only Direct can be tested.
 2. Use the test icon beside the affected source, or Test connectivity for all sources. Check the actual Direct or Proxy route and any Automatically switched message.
-3. If testing passes but collection fails, check the source’s saved Network route. To let collection switch automatically too, edit the source, select Automatic, and save. Share the source name, error, and test result if it still fails.
+3. Collection also recovers automatically without an extra switch. Testing and collection happen at different times; share the source name, error, and test result if it still fails.
 
 ### What should I do about “TLS failed” or “connection reset”?
 
@@ -107,23 +111,23 @@ TLS means a secure connection; a failure means it could not finish. A reset mean
 
 1. In Settings → Network proxy, save the HTTP proxy address actually used by your running proxy app. Its address and port must match. Ports 7897 and 1082 are only presets; the app does not search for an available port.
 2. Use the connectivity icon beside QbitAI or the affected source directly; you do not need to select Automatic first. Check the actual Direct or Proxy route. A successful switch shows Automatically switched.
-3. Testing does not change collection settings. To enable automatic switching during collection too, use the source’s pencil Edit icon, set Network route to Automatic, and save. Keep certificate verification enabled. If it still fails, compare in a browser, check the system clock, or share the error rather than bypassing security warnings.
+3. Each collection also recovers automatically. Use the source’s pencil Edit icon to choose Prefer Direct or Prefer proxy if you want to change the first attempt. Keep certificate verification enabled. If it still fails, compare in a browser, check the system clock, or share the error rather than bypassing security warnings.
 
 ### What should I do about a timeout or DNS failure?
 
 A timeout means the result took too long. A DNS failure means the website’s network address could not be found. The network may be temporarily unavailable or the address may be misspelled; the source is not necessarily gone.
 
 1. Check that other websites open, then test only this source once.
-2. Check the saved proxy address and that its app is running. Each test chooses a route automatically; a timeout or DNS connection problem can trigger one attempt over the other route. The result shows the route actually used for this test without changing collection settings.
+2. Check the saved proxy address and that its app is running. Each test chooses a route automatically; a timeout or DNS connection problem can trigger one attempt over the other route. The result shows the route actually used for this test without changing the saved route preference.
 3. Open the same address in a browser and check for spelling mistakes. If a later retry still fails, share the source, error, and test result.
 
-### Why does testing pass while collection fails? How do I make collection choose automatically too?
+### Why does testing pass while collection fails? Does collection recover automatically?
 
-Every connectivity test chooses a route afresh regardless of the saved Network route, and leaves that setting unchanged. Collection still follows the saved choice: Direct skips the proxy, Use proxy uses the saved proxy, and only Automatic can switch after a connection problem. A passing test does not change how collection connects. Testing and collection in Automatic mode keep sources on this computer on Direct. A refused connection alone does not prove a proxy fault.
+Each manual, startup, or scheduled collection reassesses its connection routes automatically. Prefer Direct and Prefer proxy choose the first route; Automatic uses the source default. A connection failure triggers at most one attempt over the other available route. If both fail, collection records the error and continues to the next source without rewriting settings. Local and private-network sources stay on Direct; without a saved proxy, only Direct is attempted.
 
 1. Save the address of your running HTTP proxy in Settings → Network proxy, then start a single-source or batch test. Ports 7897 and 1082 are only presets and must match the running app. The app does not scan ports or switch presets automatically.
-2. To enable Automatic during collection for QbitAI or another source, go to Settings → Sources, click its pencil Edit icon, set Network route to Automatic, and save. Explicit Direct or Use proxy settings are still followed during collection.
-3. Each test shows the actual Direct or Proxy route. A successful switch shows Automatically switched. Compare that result with the saved collection setting before collecting. If you stop the proxy app, sources explicitly set to Use proxy need the proxy restarted or their Network route changed.
+2. In Settings → Sources, use the pencil Edit icon to adjust the preferred first route if needed. All source modes support connection recovery without switching each source to Automatic.
+3. Tests show the actual Direct or Proxy route and an Automatically switched message when applicable. Collection records exhausted-route failures and continues with other sources, without retrying indefinitely.
 
 ### What should I do about HTTP 401/403 or human verification?
 

@@ -1,21 +1,23 @@
-/** Confirmation dialog for local maintenance, backup, and data replacement. */
+/** Shared modal confirmation for local maintenance and restoring default sources. */
 import { useEffect, useId, useRef } from 'react'
 import type { Messages } from './i18n'
 
 export type StorageAction = 'optimize' | 'backup' | 'restore'
+/** Source reset has its own consequences and never invokes a storage restore. */
+export type ConfirmationAction = StorageAction | 'restoreSources'
 
 /** Keep action-specific consequences and translated labels together. */
-export function storageConfirmation(action: StorageAction, m: Messages) {
+export function storageConfirmation(action: ConfirmationAction, m: Messages) {
   return {
-    title: action === 'optimize' ? m.storageOptimize : action === 'backup' ? m.storageBackup : m.storageRestore,
-    description: action === 'optimize' ? m.storageOptimizeConfirm : action === 'backup' ? m.storageBackupConfirm : m.storageRestoreConfirm,
-    dangerous: action === 'restore',
+    title: action === 'restoreSources' ? m.sourceRestoreDefaults : action === 'optimize' ? m.storageOptimize : action === 'backup' ? m.storageBackup : m.storageRestore,
+    description: action === 'restoreSources' ? m.sourceRestoreConfirm : action === 'optimize' ? m.storageOptimizeConfirm : action === 'backup' ? m.storageBackupConfirm : m.storageRestoreConfirm,
+    dangerous: action === 'restore' || action === 'restoreSources',
   }
 }
 
 /** Native HTML modality traps focus; Escape and Cancel dismiss without running an operation. */
 export function StorageConfirmation({ action, m, onCancel, onConfirm }: {
-  action: StorageAction
+  action: ConfirmationAction
   m: Messages
   onCancel: () => void
   onConfirm: () => void

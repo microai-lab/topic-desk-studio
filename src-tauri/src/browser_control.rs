@@ -32,6 +32,15 @@ pub enum BrowserAction {
         #[serde(default)]
         capture: bool,
     },
+    TopicRail {
+        #[serde(rename = "tabId")]
+        tab_id: String,
+        topics: Vec<crate::topic_rail::RailTopic>,
+        active: Option<i64>,
+        locale: String,
+        theme: String,
+        visible: bool,
+    },
     Print,
     Screenshot,
     Settings {
@@ -418,6 +427,26 @@ pub async fn browser_control(
                 }
             }
             Ok(json!({"preview":preview}))
+        }
+        BrowserAction::TopicRail {
+            tab_id,
+            topics,
+            active,
+            locale,
+            theme,
+            visible,
+        } => {
+            let label = crate::desktop::tab_label(&tab_id)?;
+            let target = app.get_webview(&label);
+            crate::topic_rail::update(&topics, active, &locale, &theme, visible, |script| {
+                // This overlay needs no result. Waiting for a page callback can
+                // stall every queued browser action during load or navigation.
+                match target {
+                    Some(view) => view.eval(script).map_err(|error| error.to_string()),
+                    None => Ok(()),
+                }
+            })?;
+            Ok(Value::Null)
         }
         BrowserAction::Print => {
             view()?.print().map_err(|e| e.to_string())?;

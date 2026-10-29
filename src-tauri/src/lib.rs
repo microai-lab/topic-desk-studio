@@ -22,6 +22,7 @@ mod repository;
 #[cfg(any(target_os = "macos", test))]
 mod session_context;
 mod storage;
+mod topic_rail;
 mod translator;
 mod xiaohongshu;
 

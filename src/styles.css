@@ -786,12 +786,18 @@ h1 {
 .storage-confirmation::backdrop { background: #11112555; backdrop-filter: blur(3px); }
 .storage-confirmation h2 { margin: 0 0 12px; font-size: 17px; }
 .storage-confirmation p { margin: 0; font-size: 13px; line-height: 1.8; }
-.storage-confirmation-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
-.storage-confirmation-actions button { min-height: 34px; padding: 7px 14px; }
+/* Every confirmation shares the same controls, independent of browser defaults or dialog type. */
+.storage-confirmation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.storage-confirmation-actions button { display: inline-flex; align-items: center; justify-content: center; min-width: 88px; min-height: 38px; padding: 8px 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; font-weight: 550; line-height: 20px; cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease; }
+.storage-confirmation-actions button:hover:not(:disabled) { background: var(--surface-2); border-color: color-mix(in srgb, var(--muted) 50%, var(--border)); }
+.storage-confirmation-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.storage-confirmation-actions button:disabled { opacity: .5; cursor: default; }
 .storage-confirmation-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.storage-confirmation-actions .primary:hover { background: var(--accent-h); }
+.storage-confirmation-actions .primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
 .storage-confirmation-actions .danger { background: #d94f4f; border-color: #d94f4f; color: #fff; }
-.storage-confirmation-actions .danger:hover { background: #bd3f3f; }
+.storage-confirmation-actions .danger:hover:not(:disabled) { background: #bd3f3f; border-color: #bd3f3f; }
+@media (prefers-reduced-motion: reduce) { .storage-confirmation-actions button { transition: none; } }
+
 .storage-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 9px 10px; border-radius: 7px; background: var(--surface-2); color: var(--muted); font-size: 10.5px; }
 .hidden-topics-panel { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border); }
 .hidden-topics-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
@@ -897,7 +903,7 @@ h1 {
 
 /* The native article view overlays only its placeholder; chrome remains React UI. */
 .workspace-frame { container: workspace / inline-size; min-width: 0; height: 100dvh; }
-.desk-workspace { display: grid; grid-template-columns: minmax(0, 1fr); height: 100vh; min-width: 0; overflow: hidden; transition: grid-template-columns 300ms cubic-bezier(.4,0,.2,1); }
+.desk-workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); height: 100vh; min-width: 0; overflow: hidden; transition: grid-template-columns 300ms cubic-bezier(.4,0,.2,1); }
 .topic-list-pane { container: topic-list / inline-size; min-width: 0; min-height: 0; height: 100%; overflow: auto; }
 .reader-open .filters { gap: 8px 10px; }
 .reader-open .filters select { width: 150px; min-width: 150px; max-width: 150px; }
@@ -1201,8 +1207,6 @@ button.browser-download-copy:disabled { cursor: default; }
 .source-connection-error { white-space: normal; overflow-wrap: anywhere; user-select: text; }
 .source-connection-summary-dialog { width: min(440px, calc(100vw - 40px)); }
 .source-connection-summary-dialog > p { color: var(--muted); }
-.source-connection-summary-dialog .storage-confirmation-actions button { border: 1px solid var(--accent); border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
-.source-connection-summary-dialog .storage-confirmation-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .source-connection-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; }
 .source-connection-summary-stat { display: grid; gap: 7px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .source-connection-summary-stat dt { color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }

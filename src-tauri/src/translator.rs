@@ -423,14 +423,94 @@ pub(crate) fn validate_page_translation_start(
 }
 
 /// The saved proxy is a collection route, not a universal outbound requirement.
-/// DeepSeek's official domestic API is directly reachable; loopback models must
-/// stay local. Match the exact hostname so custom/overseas providers keep their
+/// Prefer direct access to DeepSeek's official API; a connect failure may use
+/// the saved proxy once. Loopback models always stay local. Match the exact hostname so custom/overseas providers keep their
 /// existing configured route, including look-alike or subdomain endpoints.
 fn model_proxy_url<'a>(endpoint: &Url, configured_proxy: Option<&'a str>) -> Option<&'a str> {
     if local_model_endpoint(endpoint) || endpoint.host_str() == Some("api.deepseek.com") {
         None
     } else {
         configured_proxy
+    }
+}
+
+/// Only a failed HTTPS connection to the exact official host may fall back.
+/// HTTP responses, stream/body interruptions and local/custom endpoints never switch.
+fn model_fallback_proxy<'a>(
+    endpoint: &Url,
+    configured_proxy: Option<&'a str>,
+    connection_failed: bool,
+) -> Option<&'a str> {
+    (connection_failed
+        && endpoint.scheme() == "https"
+        && endpoint.host_str() == Some("api.deepseek.com"))
+    .then_some(configured_proxy)
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+}
+
+/// Keep transport errors actionable without exposing request bodies or authentication headers.
+fn model_transport_error(error: reqwest::Error, retried: bool) -> AppError {
+    let reason = if error.is_connect() {
+        "无法建立安全连接，请检查网络或代理"
+    } else if error.is_timeout() {
+        "模型请求超时，请稍后重试"
+    } else {
+        "模型请求发送失败，请检查网络"
+    };
+    let route = if retried {
+        "（直连失败后已尝试保存的代理）"
+    } else {
+        ""
+    };
+    AppError::Translation(format!("{reason}{route}：{}", error.without_url()))
+}
+
+/// Replay a buffered request only before a connection was established, never after
+/// HTTP/stream output. Dropping this future also cancels the single fallback attempt.
+async fn send_model_request(
+    request: reqwest::RequestBuilder,
+    endpoint: &Url,
+    proxy: Option<&str>,
+) -> AppResult<reqwest::Response> {
+    let replay = request.try_clone().and_then(|value| value.build().ok());
+    match request.send().await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let Some(proxy) = model_fallback_proxy(endpoint, proxy, error.is_connect()) else {
+                return Err(model_transport_error(error, false));
+            };
+            let Some(replay) = replay else {
+                return Err(model_transport_error(error, false));
+            };
+            async_model_client(Some(proxy))?
+                .execute(replay)
+                .await
+                .map_err(|error| model_transport_error(error, true))
+        }
+    }
+}
+
+/// Title translation uses the same bounded connection recovery as page translation.
+fn send_model_request_blocking(
+    request: reqwest::blocking::RequestBuilder,
+    endpoint: &Url,
+    proxy: Option<&str>,
+) -> AppResult<reqwest::blocking::Response> {
+    let replay = request.try_clone().and_then(|value| value.build().ok());
+    match request.send() {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let Some(proxy) = model_fallback_proxy(endpoint, proxy, error.is_connect()) else {
+                return Err(model_transport_error(error, false));
+            };
+            let Some(replay) = replay else {
+                return Err(model_transport_error(error, false));
+            };
+            model_client(Some(proxy))?
+                .execute(replay)
+                .map_err(|error| model_transport_error(error, true))
+        }
     }
 }
 
@@ -585,7 +665,7 @@ async fn request_model_text_streaming(
     };
     let client = async_model_client(model_proxy_url(&endpoint, proxy_url))?;
     let mut request = match protocol {
-        TranslationProtocol::OpenAi => client.post(endpoint).json(&json!({
+        TranslationProtocol::OpenAi => client.post(endpoint.clone()).json(&json!({
             "model": settings.model,
             "temperature": 0,
             "max_tokens": 2048,
@@ -596,7 +676,7 @@ async fn request_model_text_streaming(
             ]
         })),
         TranslationProtocol::Anthropic => client
-            .post(endpoint)
+            .post(endpoint.clone())
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": settings.model,
@@ -613,10 +693,7 @@ async fn request_model_text_streaming(
         };
     }
     drop(api_key);
-    let response = request
-        .send()
-        .await
-        .map_err(|error| AppError::Translation(format!("模型请求失败：{error}")))?;
+    let response = send_model_request(request, &endpoint, proxy_url).await?;
     let status = response.status();
     if !status.is_success() {
         let payload: Value = response
@@ -700,7 +777,7 @@ async fn request_model_text_async(
     };
     let client = async_model_client(model_proxy_url(&endpoint, proxy_url))?;
     let mut request = match protocol {
-        TranslationProtocol::OpenAi => client.post(endpoint).json(&json!({
+        TranslationProtocol::OpenAi => client.post(endpoint.clone()).json(&json!({
             "model": settings.model,
             "temperature": 0,
             "max_tokens": max_tokens,
@@ -710,7 +787,7 @@ async fn request_model_text_async(
             ]
         })),
         TranslationProtocol::Anthropic => client
-            .post(endpoint)
+            .post(endpoint.clone())
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": settings.model,
@@ -726,10 +803,7 @@ async fn request_model_text_async(
         };
     }
     drop(api_key);
-    let response = request
-        .send()
-        .await
-        .map_err(|error| AppError::Translation(format!("模型请求失败：{error}")))?;
+    let response = send_model_request(request, &endpoint, proxy_url).await?;
     let status = response.status();
     let payload: Value = response
         .json()
@@ -802,7 +876,7 @@ fn request_model_text(
     };
     let client = model_client(model_proxy_url(&endpoint, proxy_url))?;
     let mut request = match protocol {
-        TranslationProtocol::OpenAi => client.post(endpoint).json(&json!({
+        TranslationProtocol::OpenAi => client.post(endpoint.clone()).json(&json!({
             "model": settings.model,
             "temperature": 0,
             "max_tokens": max_tokens,
@@ -812,7 +886,7 @@ fn request_model_text(
             ]
         })),
         TranslationProtocol::Anthropic => client
-            .post(endpoint)
+            .post(endpoint.clone())
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": settings.model,
@@ -828,9 +902,7 @@ fn request_model_text(
         };
     }
     drop(api_key);
-    let response = request
-        .send()
-        .map_err(|error| AppError::Translation(format!("模型请求失败：{error}")))?;
+    let response = send_model_request_blocking(request, &endpoint, proxy_url)?;
     let status = response.status();
     let payload: Value = response
         .json()
@@ -1289,6 +1361,29 @@ mod tests {
             let route = model_proxy_url(&url, Some("http://["));
             assert!(async_model_client(route).is_ok());
             assert!(model_client(route).is_ok());
+        }
+    }
+
+    #[test]
+    fn deepseek_connection_failure_can_use_saved_proxy_without_changing_direct_preference() {
+        let proxy = Some("http://127.0.0.1:1082");
+        let (official, _) = translation_endpoint("https://api.deepseek.com/v1").unwrap();
+        assert_eq!(model_proxy_url(&official, proxy), None);
+        assert_eq!(model_fallback_proxy(&official, proxy, true), proxy);
+        // Responses such as 401/429/500 and stream failures are not connect errors.
+        assert_eq!(model_fallback_proxy(&official, proxy, false), None);
+        assert_eq!(model_fallback_proxy(&official, None, true), None);
+        assert_eq!(model_fallback_proxy(&official, Some("  "), true), None);
+        for endpoint in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1/v1",
+            "https://api.openai.com/v1",
+            "https://api.deepseek.com.example.org/v1",
+            "https://proxy.api.deepseek.com/v1",
+            "http://api.deepseek.com/v1",
+        ] {
+            let (url, _) = translation_endpoint(endpoint).unwrap();
+            assert_eq!(model_fallback_proxy(&url, proxy, true), None, "{endpoint}");
         }
     }
 

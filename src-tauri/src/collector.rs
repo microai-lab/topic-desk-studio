@@ -125,7 +125,7 @@ fn source_client(proxy: Option<&str>) -> AppResult<Client> {
 }
 
 /// Only a typed connection failure can switch once. Diagnostics reassess routes
-/// independently; collection respects saved modes. Both share the same fetcher.
+/// independently; collection starts with the saved preference. Both share the same fetcher.
 fn run_source_routes(
     platform: &PlatformSource,
     proxy_configured: bool,
@@ -146,8 +146,8 @@ fn run_source_routes(
             }
         }
     };
-    // Explicit/no-alternate collection keeps its established per-request policy;
-    // only recoverable Auto collection needs a total routing deadline.
+    // No-alternate collection keeps its established per-request policy;
+    // any recoverable collection uses a shared deadline across both routes.
     if !diagnostic && plan.fallback.is_none() {
         return RoutedSource {
             result: fetch(plan.preferred),
@@ -1610,74 +1610,121 @@ mod tests {
     }
 
     #[test]
-    fn auto_never_switches_for_http_parse_or_empty_results_or_error_words() {
-        use SourceConnectionTestRoute::Direct;
-        let source = diagnostic_platform("qbitai");
-        for text in [
-            "HTTP 401",
-            "HTTP 403",
-            "HTTP 404",
-            "HTTP 429",
-            "HTTP 503",
-            "Feed 无效",
-            "https://tls.example.com DNS reset timeout",
+    fn no_collection_mode_switches_for_http_parse_or_empty_results_or_error_words() {
+        for mode in [
+            SourceProxyMode::Direct,
+            SourceProxyMode::Proxy,
+            SourceProxyMode::Auto,
         ] {
-            let mut attempts = 0;
-            let routed = run_source_routes(&source, true, true, |route| {
-                attempts += 1;
-                assert_eq!(route, Direct);
-                Err(AppError::Collection(text.into()))
-            });
-            assert_eq!(attempts, 1, "{text}");
-            assert!(routed.fallback_from.is_none());
+            let mut source = diagnostic_platform("qbitai");
+            source.proxy_mode = mode;
+            for diagnostic in [true, false] {
+                for text in [
+                    "HTTP 401",
+                    "HTTP 403",
+                    "HTTP 404",
+                    "HTTP 429",
+                    "HTTP 503",
+                    "Feed 无效",
+                    "https://tls.example.com DNS reset timeout",
+                ] {
+                    let mut attempts = 0;
+                    let routed = run_source_routes(&source, true, diagnostic, |_| {
+                        attempts += 1;
+                        Err(AppError::Collection(text.into()))
+                    });
+                    assert_eq!(attempts, 1, "{text}");
+                    assert!(routed.fallback_from.is_none());
+                }
+                let mut attempts = 0;
+                let routed = run_source_routes(&source, true, diagnostic, |_| {
+                    attempts += 1;
+                    Ok(ParsedFeed {
+                        topics: vec![],
+                        fetched_count: 0,
+                        invalid_count: 0,
+                    })
+                });
+                assert_eq!(attempts, 1);
+                assert!(routed.result.unwrap().topics.is_empty());
+                assert!(routed.fallback_from.is_none());
+            }
         }
-        let mut attempts = 0;
-        let routed = run_source_routes(&source, true, true, |_| {
-            attempts += 1;
-            Ok(ParsedFeed {
-                topics: vec![],
-                fetched_count: 0,
-                invalid_count: 0,
-            })
-        });
-        assert_eq!(attempts, 1);
-        assert!(routed.result.unwrap().topics.is_empty());
-        assert!(routed.fallback_from.is_none());
     }
 
     #[test]
-    fn explicit_collection_modes_missing_proxy_and_local_auto_cannot_switch_routes() {
-        for mode in [SourceProxyMode::Direct, SourceProxyMode::Proxy] {
+    fn every_collection_recovers_from_connection_failures_without_rewriting_preferences() {
+        use SourceConnectionTestRoute::{Direct, Proxy};
+        for (mode, expected) in [
+            (SourceProxyMode::Direct, [Direct, Proxy]),
+            (SourceProxyMode::Proxy, [Proxy, Direct]),
+            (SourceProxyMode::Auto, [Direct, Proxy]),
+        ] {
             let mut source = diagnostic_platform("qbitai");
             source.proxy_mode = mode;
-            let mut attempts = Vec::new();
-            let routed = run_source_routes(&source, true, false, |route| {
-                attempts.push(route);
-                Err(AppError::CollectionConnection("fixture".into()))
-            });
-            assert_eq!(attempts.len(), 1);
-            assert!(routed.fallback_from.is_none());
-            if mode == SourceProxyMode::Proxy {
-                let absent = run_source_routes(&source, false, false, |_| {
-                    panic!("missing proxy must not request")
+            // Each new collection retries the preference, rather than caching a stale successful route.
+            for _ in 0..2 {
+                let mut attempts = Vec::new();
+                let routed = run_source_routes(&source, true, false, |route| {
+                    attempts.push(route);
+                    if attempts.len() == 1 {
+                        Err(AppError::CollectionConnection("TLS fixture".into()))
+                    } else {
+                        Ok(fixture_feed(&source.code))
+                    }
                 });
-                assert!(absent.route.is_none());
-                assert!(absent
-                    .result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("请先保存代理地址"));
+                assert!(routed.result.is_ok());
+                assert_eq!(attempts, expected);
+                assert_eq!(source.proxy_mode, mode);
             }
         }
-        let mut source = diagnostic_platform("qbitai");
-        source.endpoint_url = "http://localhost/feed".into();
-        let mut attempts = 0;
-        let routed = run_source_routes(&source, true, true, |_| {
-            attempts += 1;
-            Err(AppError::CollectionConnection("fixture".into()))
-        });
-        assert_eq!(attempts, 1);
-        assert!(routed.fallback_from.is_none());
+    }
+
+    #[test]
+    fn missing_proxy_and_local_collection_never_attempt_unavailable_alternates() {
+        for mode in [
+            SourceProxyMode::Direct,
+            SourceProxyMode::Proxy,
+            SourceProxyMode::Auto,
+        ] {
+            let mut source = diagnostic_platform("qbitai");
+            source.proxy_mode = mode;
+            for (endpoint, configured) in [
+                ("https://example.org/feed", false),
+                ("http://localhost/feed", true),
+            ] {
+                source.endpoint_url = endpoint.into();
+                let mut attempts = Vec::new();
+                let routed = run_source_routes(&source, configured, false, |route| {
+                    attempts.push(route);
+                    Err(AppError::CollectionConnection("fixture".into()))
+                });
+                assert_eq!(attempts, [SourceConnectionTestRoute::Direct]);
+                assert!(routed.fallback_from.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_routes_do_not_prevent_the_next_source_from_succeeding() {
+        let sources = [diagnostic_platform("qbitai"), diagnostic_platform("github")];
+        let mut outcomes = Vec::new();
+        for source in sources {
+            let mut attempts = 0;
+            let routed = run_source_routes(&source, true, false, |_| {
+                attempts += 1;
+                if source.code == "qbitai" {
+                    Err(AppError::CollectionConnection("fixture".into()))
+                } else {
+                    Ok(fixture_feed(&source.code))
+                }
+            });
+            outcomes.push((source.code, attempts, routed.result.is_ok()));
+        }
+        assert_eq!(
+            outcomes,
+            [("qbitai".into(), 2, false), ("github".into(), 1, true)]
+        );
     }
 
     #[test]
@@ -1772,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn budgets_reserve_an_alternate_without_shortening_explicit_collection() {
+    fn budgets_reserve_an_alternate_for_all_recoverable_collection_modes() {
         let source = diagnostic_platform("qbitai");
         for diagnostic in [true, false] {
             let mut attempts = 0;
@@ -1799,7 +1846,7 @@ mod tests {
         }
         let mut explicit = source;
         explicit.proxy_mode = SourceProxyMode::Direct;
-        run_source_routes(&explicit, true, false, |_| {
+        run_source_routes(&explicit, false, false, |_| {
             assert!(SOURCE_TEST_BUDGET.get().is_none());
             Ok(fixture_feed(&explicit.code))
         });

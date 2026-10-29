@@ -868,6 +868,7 @@ pub fn browser_request(
                 crate::desktop_sessions::capture_all(app)?;
                 let initial_url = url.clone();
                 let popup_app = app.clone();
+                let navigation_app = app.clone();
                 let title_tab = tab_id.to_string();
                 let page_tab = tab_id.to_string();
                 let popup_tab = tab_id.to_string();
@@ -900,7 +901,19 @@ pub fn browser_request(
                 // embeds can otherwise open their own persistent database.
                 .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
                 .initialization_script_for_all_frames(include_str!("page_media.js"))
-                .on_navigation(is_article_url)
+                .on_navigation(move |url| {
+                    // Some engines report target=_blank custom schemes as navigation
+                    // before requesting a popup. Cancel both paths after routing.
+                    if let Some(topic) = crate::topic_rail::popup(url) {
+                        let _ = navigation_app.emit_to(
+                            EventTarget::webview("main"),
+                            "browser-topic-open",
+                            topic,
+                        );
+                        return false;
+                    }
+                    is_article_url(url)
+                })
                 .on_document_title_changed(move |view, title| {
                     browser_profile::title_changed(view.app_handle(), &title_tab, title)
                 })
@@ -1065,6 +1078,15 @@ pub fn browser_request(
                     true
                 })
                 .on_new_window(move |url, _| {
+                    // This is untrusted navigation from a page-local overlay, never IPC.
+                    if let Some(topic) = crate::topic_rail::popup(&url) {
+                        let _ = popup_app.emit_to(
+                            EventTarget::webview("main"),
+                            "browser-topic-open",
+                            topic,
+                        );
+                        return NewWindowResponse::Deny;
+                    }
                     // WebKit creates an allowed popup with the caller's
                     // configuration, preserving the non-persistent data
                     // store and opener relationship required by Baidu's

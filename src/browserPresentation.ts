@@ -2,6 +2,19 @@
 
 import type { BrowserAction, BrowserSettings } from './api'
 
+/** Apply an already-successful native close. Only removing the final tab restores
+ * the topic list; stale close notifications cannot hide a newly opened reader. */
+export function browserTabClosePlan<T extends { readonly id: string }>(tabs: readonly T[], activeId: string, closedId: string) {
+  const index = tabs.findIndex(tab => tab.id === closedId)
+  if (index < 0) return undefined
+  const remaining = tabs.filter(tab => tab.id !== closedId)
+  return {
+    remaining,
+    activeId: activeId === closedId ? remaining[Math.min(index, remaining.length - 1)]?.id ?? '' : activeId,
+    restoreTopics: remaining.length === 0,
+  }
+}
+
 export type DownloadState = 'downloading' | 'complete' | 'cancelled' | 'failed'
 
 /** Decode the native `state\npath` representation without trusting unknown states. */

@@ -1,4 +1,4 @@
-//! Pure source routing: saved modes govern collection; diagnostics reassess routes independently.
+//! Pure source routing: saved preferences choose the first route; connection failures may recover once.
 use crate::{
     error::{AppError, AppResult},
     models::{PlatformSource, SourceConnectionTestRoute, SourceProxyMode},
@@ -49,8 +49,8 @@ fn local_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Validate the configured address before making requests. Auto retains catalog
-/// preference and may try its opposite; Direct/Proxy always remain explicit.
+/// Validate sources before requests. Saved modes choose the preferred route,
+/// while every collection may recover through the other configured route once.
 pub(crate) fn route_plan(
     platform: &PlatformSource,
     proxy_configured: bool,
@@ -67,34 +67,24 @@ pub(crate) fn route_plan(
         ));
     }
     use SourceConnectionTestRoute::{Direct, Proxy};
-    match platform.proxy_mode {
-        SourceProxyMode::Direct => Ok(RoutePlan {
+    if !proxy_configured || local_endpoint(&endpoint) {
+        return Ok(RoutePlan {
             preferred: Direct,
             fallback: None,
-        }),
-        SourceProxyMode::Proxy if !proxy_configured => Err(AppError::InvalidInput(
-            "该来源已指定代理，请先保存代理地址".into(),
-        )),
-        SourceProxyMode::Proxy => Ok(RoutePlan {
-            preferred: Proxy,
-            fallback: None,
-        }),
-        SourceProxyMode::Auto if !proxy_configured || local_endpoint(&endpoint) => Ok(RoutePlan {
-            preferred: Direct,
-            fallback: None,
-        }),
-        SourceProxyMode::Auto => {
-            let preferred = if crate::catalog::default_proxy_mode(&platform.code) == "proxy" {
-                Proxy
-            } else {
-                Direct
-            };
-            Ok(RoutePlan {
-                preferred,
-                fallback: Some(if preferred == Direct { Proxy } else { Direct }),
-            })
-        }
+        });
     }
+    let preferred = match platform.proxy_mode {
+        SourceProxyMode::Direct => Direct,
+        SourceProxyMode::Proxy => Proxy,
+        SourceProxyMode::Auto if crate::catalog::default_proxy_mode(&platform.code) == "proxy" => {
+            Proxy
+        }
+        SourceProxyMode::Auto => Direct,
+    };
+    Ok(RoutePlan {
+        preferred,
+        fallback: Some(if preferred == Direct { Proxy } else { Direct }),
+    })
 }
 
 /// A user-triggered diagnostic always reassesses the current network like Auto,
@@ -175,35 +165,29 @@ mod tests {
         );
     }
     #[test]
-    fn explicit_modes_never_switch_and_proxy_requires_an_address() {
+    fn saved_modes_choose_priority_but_all_collection_modes_can_recover_once() {
         use SourceConnectionTestRoute::{Direct, Proxy};
-        assert_eq!(
-            route_plan(
-                &source("github", SourceProxyMode::Direct, "https://github.com"),
-                true
-            )
-            .unwrap(),
-            RoutePlan {
-                preferred: Direct,
-                fallback: None
-            }
-        );
-        assert_eq!(
-            route_plan(
-                &source("custom", SourceProxyMode::Proxy, "http://localhost/feed"),
-                true
-            )
-            .unwrap(),
-            RoutePlan {
-                preferred: Proxy,
-                fallback: None
-            }
-        );
-        assert!(route_plan(
-            &source("custom", SourceProxyMode::Proxy, "https://example.com/feed"),
-            false
-        )
-        .is_err());
+        for (mode, preferred, alternate) in [
+            (SourceProxyMode::Direct, Direct, Proxy),
+            (SourceProxyMode::Proxy, Proxy, Direct),
+        ] {
+            let source = source("qbitai", mode, "https://example.org/feed");
+            assert_eq!(
+                route_plan(&source, true).unwrap(),
+                RoutePlan {
+                    preferred,
+                    fallback: Some(alternate)
+                }
+            );
+            assert_eq!(source.proxy_mode, mode);
+            assert_eq!(
+                route_plan(&source, false).unwrap(),
+                RoutePlan {
+                    preferred: Direct,
+                    fallback: None
+                }
+            );
+        }
     }
 
     #[test]
@@ -236,7 +220,10 @@ mod tests {
                 fallback: None
             }
         );
-        assert!(route_plan(&explicit_proxy, false).is_err());
+        assert_eq!(
+            route_plan(&explicit_proxy, false).unwrap().preferred,
+            Direct
+        );
     }
 
     #[test]
@@ -258,7 +245,7 @@ mod tests {
             );
             assert_eq!(
                 route_plan(&source, true).unwrap().preferred,
-                SourceConnectionTestRoute::Proxy
+                SourceConnectionTestRoute::Direct
             );
         }
         assert!(diagnostic_route_plan(

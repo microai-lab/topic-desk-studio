@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { ArrowDownToLine, ArrowLeft, ArrowRight, Camera, ChevronDown, ChevronUp, Cookie, EllipsisVertical, ExternalLink, File, FolderOpen, Globe2, History, Languages, LoaderCircle, Minus, MonitorSmartphone, Plus, Printer, RefreshCw, RotateCw, Search, Settings2, Trash2, X, ZoomIn } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { browserControl, browserRequest } from './api'
-import type { BrowserLibrary, BrowserSettings, BrowserStatus, BrowserTranslationProgress } from './api'
+import type { TopicRailItem, BrowserLibrary, BrowserSettings, BrowserStatus, BrowserTranslationProgress } from './api'
 import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
 import type { Locale } from './i18n'
 import { clampTopicWidth, topicDragWidth, TOPIC_PANE_MIN_WIDTH } from './layout'
@@ -22,6 +22,7 @@ export interface BrowserTab {
   topicId?: number
   sourceUrl?: string
 }
+const EMPTY_RAIL_TOPICS: readonly TopicRailItem[] = []
 const DEFAULT_SETTINGS: BrowserSettings = { searchEngine: 'bing', zoom: 1, rememberHistory: true, translationLanguage: 'auto' }
 const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
 
@@ -45,8 +46,8 @@ function Icon({ name }: { name: BrowserIconName }) {
 }
 
 /** Host a native browser while React owns the address bar, overlays and layout. */
-export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, topicWidth, topicMaxWidth, onActivate, onNewTab, onUpdateTab, onCloseTab, onMoveTab, onPinTab, onExpand, onCollectXiaohongshu, onClose, onResize }: {
-  tabs: BrowserTab[]; activeTabId: string; locale: Locale; expanded: boolean; closing?: boolean; topicWidth: number; topicMaxWidth: number
+export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisible = false, railTopics = EMPTY_RAIL_TOPICS, theme = 'system', onOpenRailTopic, closing, topicWidth, topicMaxWidth, onActivate, onNewTab, onUpdateTab, onCloseTab, onMoveTab, onPinTab, onExpand, onCollectXiaohongshu, onClose, onResize }: {
+  tabs: BrowserTab[]; activeTabId: string; locale: Locale; expanded: boolean; topicRailVisible?: boolean; railTopics?: readonly TopicRailItem[] | undefined; theme?: 'light' | 'dark' | 'system'; onOpenRailTopic: (topic: TopicRailItem) => void; closing?: boolean; topicWidth: number; topicMaxWidth: number
   onActivate: (id: string) => void; onNewTab: () => void
   onUpdateTab: (id: string, update: Partial<Pick<BrowserTab, 'url' | 'title'>>) => void
   onCloseTab: (id: string) => void
@@ -148,6 +149,9 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, topi
       // WebView). Always accept the canonical top-level URL from Rust.
       if (payload.tabId === activeTabRef.current) setAddress(payload.url)
     })
+    const unrail = listen<TopicRailItem>('browser-topic-open', ({ payload }) => {
+      if (alive.current) onOpenRailTopic(payload)
+    })
     const unsession = listen<string>('browser-session-error', ({ payload }) => fail(payload))
     const unlibrary = listen('browser-library-changed', () => { void refreshLibrary().catch(fail) })
     const untranslation = listen<BrowserTranslationProgress>('browser-translation-progress', ({ payload }) => {
@@ -164,12 +168,13 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, topi
       alive.current = false
       void unlisten.then((stop) => stop()).catch(() => {})
       void unlibrary.then((stop) => stop()).catch(() => {})
+      void unrail.then((stop) => stop()).catch(() => {})
       void unsession.then((stop) => stop()).catch(() => {})
       void untranslation.then((stop) => stop()).catch(() => {})
       void unpopup.then((stop) => stop()).catch(() => {})
       void browserRequest('hideAll').catch(() => {})
     }
-  }, [fail, onUpdateTab, refreshLibrary])
+  }, [fail, onUpdateTab, onOpenRailTopic, refreshLibrary])
 
   useEffect(() => {
     if (notice === null) return
@@ -245,6 +250,17 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, closing, topi
     const timer = window.setTimeout(() => setSlowLoading(true), 8_000)
     return () => window.clearTimeout(timer)
   }, [activeTabId, status.loading, status.url])
+
+  // Render directly inside the isolated article surface, with no split-pane
+  // inset or native-view hiding. Navigation recreates the page, so replay after load.
+  useEffect(() => {
+    if (status.loading) return
+    void browserControl({
+      kind: 'topicRail', tabId: activeTabId, visible: topicRailVisible, active: activeTab?.topicId ?? null,
+      topics: railTopics.map(({ id, title, platformName, url }) => ({ id, title, platformName, url })),
+      locale, theme,
+    }).catch(fail)
+  }, [activeTabId, activeTab?.topicId, status.loading, status.url, topicRailVisible, railTopics, locale, theme, fail])
 
   const showPanel = async (next: Panel) => {
     setError(null); setNotice(null); setFilter('')
