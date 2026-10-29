@@ -24,6 +24,11 @@ describe('sidebar toggle labels', () => {
 
 /** Proxy settings omit the retired routing explanation in both locales. */
 describe('proxy settings copy', () => {
+  it('describes automatic connection recovery using the saved proxy', () => {
+    expect(messages.zh.sourceAutoHelp).toContain('已保存的代理')
+    expect(messages.zh.sourceAutoHelp).toContain('连接失败')
+    expect(messages.en.sourceAutoHelp).toContain('saved proxy')
+  })
   it('removes the obsolete routing help text', () => {
     for (const locale of ['zh', 'en'] as const) {
       expect(messages[locale]).not.toHaveProperty('proxyHelp')

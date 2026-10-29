@@ -9,7 +9,7 @@ import {
   getModelSettings, getNetworkSettings, getStorageStatus, getUiPreferences, importSourceConfigurations, listHiddenTopics, listSourceConfigurations, listTopics,
   openDataDirectory, optimizeStorage, refreshTopics, restoreLatestBackup, saveModelSettings,
   reorderSourceConfigurations, restoreAllHiddenTopics, restoreDefaultSources, restoreHiddenTopic, saveNetworkSettings, saveSourceConfiguration, saveUiPreferences, setPlatformEnabled,
-  setTopicQueued, translateTopic,
+  setTopicQueued, testSourceConnection, translateTopic,
 } from './api'
 import { ProxyAddressField } from './ProxyAddressField'
 import { DEFAULT_PROXY_URL } from './networkPresentation'
@@ -18,6 +18,10 @@ import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
 import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, sidebarNavigationPlan } from './layout'
 import { StorageConfirmation } from './StorageConfirmation'
+import { SourceConnectionBatchTestButton, SourceConnectionTestButton, SourceConnectionTestResultView } from './SourceConnectionTest'
+import { SourceConnectionSummaryDialog } from './SourceConnectionSummaryDialog'
+import { matchingSourceConnectionState, runSourceConnectionBatch, runSourceConnectionTest, sourceConnectionKey, sourceHealthTone } from './sourceConnectionPresentation'
+import type { SourceConnectionBatchProgress, SourceConnectionTestState } from './sourceConnectionPresentation'
 import type { StorageAction } from './StorageConfirmation'
 import type { BrowserTab } from './BrowserPane'
 import { parseStoredTimestamp, rankTrendPoints, shouldOfferTitleTranslation } from './presentation'
@@ -341,6 +345,12 @@ export function App() {
   const [hiddenTopicsPage, setHiddenTopicsPage] = useState(0)
   const [restoringHidden, setRestoringHidden]    = useState<number | 'all'>()
   const [sourceConfigs,   setSourceConfigs]      = useState<SourceConfiguration[]>([])
+  const [sourceConnectionTests, setSourceConnectionTests] = useState<Record<string, SourceConnectionTestState>>({})
+  const [sourceNetworkRevision, setSourceNetworkRevision] = useState(0)
+  const sourceTestsInFlight = useRef(new Set<string>())
+  const [sourceTestBatch, setSourceTestBatch] = useState<{ running: boolean; progress: SourceConnectionBatchProgress }>()
+  const [sourceTestSummary, setSourceTestSummary] = useState<SourceConnectionBatchProgress>()
+  const sourceTestBatchInFlight = useRef(false)
   const [sourceDraft,     setSourceDraft]        = useState<SaveSourceConfiguration>()
   const [editingSourceCode, setEditingSourceCode] = useState<string>()
   const [sourceBuiltIn,   setSourceBuiltIn]      = useState(false)
@@ -698,6 +708,38 @@ export function App() {
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
+  /** Each diagnostic reevaluates routes using saved source/proxy details, independently of collection mode.
+   * A per-source gate also catches double clicks before React disables the button. */
+  const testSourceConfiguration = async (source: SourceConfiguration): Promise<void> => {
+    if (sourceTestBatchInFlight.current || sourceTestsInFlight.current.has(source.code)) return
+    const key = sourceConnectionKey(source, sourceNetworkRevision)
+    sourceTestsInFlight.current.add(source.code)
+    try {
+      await runSourceConnectionTest(source.code, key, testSourceConnection, (state) => {
+        setSourceConnectionTests((current) => ({ ...current, [source.code]: state }))
+      })
+    } finally {
+      sourceTestsInFlight.current.delete(source.code)
+    }
+  }
+
+  /** A single queue owns native tests during a batch, including disabled sources.
+   * Individual requests must finish first so the shared native limit stays bounded. */
+  const testAllSourceConfigurations = async (): Promise<void> => {
+    if (sourceTestBatchInFlight.current || sourceTestsInFlight.current.size > 0 || sourceConfigs.length === 0) return
+    sourceTestBatchInFlight.current = true
+    setSourceTestSummary(undefined)
+    try {
+      const progress = await runSourceConnectionBatch(sourceConfigs, sourceNetworkRevision, testSourceConnection,
+        (code, state) => setSourceConnectionTests((current) => ({ ...current, [code]: state })),
+        (progress) => setSourceTestBatch({ running: true, progress }))
+      setSourceTestBatch({ running: false, progress })
+      setSourceTestSummary(progress)
+    } finally {
+      sourceTestBatchInFlight.current = false
+    }
+  }
+
   const editSource = (source?: SourceConfiguration): void => {
     setError(undefined); setNotice(undefined)
     if (source !== undefined && editingSourceCode === source.code && sourceDraft !== undefined) {
@@ -829,7 +871,7 @@ export function App() {
   const beginSourcePointerDrag = (event: ReactPointerEvent<HTMLDivElement>, code: string): void => {
     if (reorderingSources || event.button !== 0) return
     const origin = event.target
-    if (origin instanceof Element && origin.closest('button, input, label, select, textarea, a')) return
+    if (origin instanceof Element && origin.closest('button, input, label, select, textarea, a, .source-connection-result')) return
     if (event.pointerType !== 'mouse' && origin instanceof Element && !origin.closest('.source-drag-handle')) return
     event.preventDefault()
     window.getSelection()?.removeAllRanges()
@@ -917,6 +959,8 @@ export function App() {
     try {
       const settings = await saveNetworkSettings({ proxyUrl })
       setProxyUrl(settings.proxyUrl ?? '')
+      // Results from the previous saved network route must not appear current.
+      setSourceNetworkRevision((revision) => revision + 1)
       setNotice({ scope: 'network', text: m.networkSaveNotice })
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -1011,7 +1055,7 @@ export function App() {
         <label><span>{m.sourceParser}</span><select value={sourceDraft.parserType} disabled={sourceBuiltIn} onChange={(e) => updateSourceDraft({ parserType: e.target.value as SaveSourceConfiguration['parserType'], parserConfig: {} })}>{sourceBuiltIn ? <option value="builtin">{m.sourceBuiltIn}</option> : null}<option value="rss">RSS / Atom</option><option value="json">JSON</option><option value="html">HTML</option></select></label>
         <label><span>{m.filterRegion}</span><select value={sourceDraft.region} onChange={(e) => updateSourceDraft({ region: e.target.value as SourceRegion })}><option value="domestic">{m.regionDomestic}</option><option value="international">{m.regionIntl}</option></select></label>
         <label><span>{m.filterCategory}</span><select value={sourceDraft.category} onChange={(e) => updateSourceDraft({ category: e.target.value as TopicCategory })}><option value="general">{m.filterGeneral}</option><option value="technology">{m.filterTech}</option><option value="finance">{m.filterFinance}</option><option value="developer">{m.filterDev}</option></select></label>
-        <label><span>{m.sourceProxyMode}</span><select value={sourceDraft.proxyMode} onChange={(e) => updateSourceDraft({ proxyMode: e.target.value as SaveSourceConfiguration['proxyMode'] })}><option value="auto">{m.sourceAuto}</option><option value="direct">{m.sourceDirect}</option><option value="proxy">{m.sourceProxy}</option></select></label>
+        <label><span>{m.sourceProxyMode}</span><select value={sourceDraft.proxyMode} onChange={(e) => updateSourceDraft({ proxyMode: e.target.value as SaveSourceConfiguration['proxyMode'] })}><option value="auto">{m.sourceAuto}</option><option value="direct">{m.sourceDirect}</option><option value="proxy">{m.sourceProxy}</option></select>{sourceDraft.proxyMode === 'auto' ? <small className="source-network-help">{m.sourceAutoHelp}</small> : null}</label>
       </div>
       {sourceDraft.parserType === 'json' ? <div className="source-parser-grid">
         {([['itemsPath', m.sourceItemsPath, 'data.items'], ['titlePath', m.sourceTitlePath, 'title'], ['urlPath', m.sourceUrlPath, 'url'], ['idPath', m.sourceIdPath, 'id'], ['publishedPath', m.sourcePublishedPath, 'publishedAt'], ['rankPath', m.sourceRankPath, 'rank'], ['heatPath', m.sourceHeatPath, 'score']] as const).map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={sourceDraft.parserConfig[key] ?? ''} placeholder={placeholder} onChange={(e) => updateParserConfig(key, e.target.value)} /></label>)}
@@ -1049,6 +1093,7 @@ export function App() {
     return (
       <div className="settings-fullscreen">
         {renderToastLayer()}
+        {sourceTestSummary !== undefined && pendingStorageAction === null ? <SourceConnectionSummaryDialog progress={sourceTestSummary} locale={locale} onClose={() => setSourceTestSummary(undefined)} /> : null}
         {pendingStorageAction !== null ? <StorageConfirmation action={pendingStorageAction} m={m}
           onCancel={() => setPendingStorageAction(null)}
           onConfirm={() => { setPendingStorageAction(null); void runStorageAction(pendingStorageAction) }} /> : null}
@@ -1139,6 +1184,10 @@ export function App() {
                 <header className="settings-page-header source-settings-header">
                   <div><h2>{m.tabSources}</h2><p>{m.settingsSourcesDesc}</p></div>
                   <div className="source-batch-actions">
+                    <SourceConnectionBatchTestButton locale={locale} running={sourceTestBatch?.running === true}
+                      disabled={Object.values(sourceConnectionTests).some((state) => state.phase === 'testing' || state.phase === 'queued') || sourceConfigs.length === 0}
+                      completed={sourceTestBatch?.progress.completed ?? 0} total={sourceTestBatch?.progress.total ?? 0}
+                      onTest={() => void testAllSourceConfigurations()} />
                     <button type="button" onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
                     <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
                     <button type="button" onClick={() => void restoreSources()}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
@@ -1150,6 +1199,9 @@ export function App() {
                 <div className="source-list" aria-busy={reorderingSources}>
                   {sourceConfigs.map((sourceConfig) => {
                     const status = page?.statuses.find((item) => item.code === sourceConfig.code)
+                    const sourceTest = sourceConnectionTests[sourceConfig.code]
+                    const connectionState = sourceTest?.phase === 'testing' ? sourceTest
+                      : matchingSourceConnectionState(sourceTest, sourceConnectionKey(sourceConfig, sourceNetworkRevision))
                     return <div
                       className={`source-list-item${draggingSourceCode === sourceConfig.code ? ' dragging' : ''}${sourceDropTarget?.code === sourceConfig.code ? (sourceDropTarget.after ? ' drop-after' : ' drop-before') : ''}`}
                       key={sourceConfig.code}
@@ -1168,11 +1220,13 @@ export function App() {
                           aria-hidden="true"
                           title={m.sourceDragToReorder}
                         ><GripVertical aria-hidden="true" /></span>
-                        <span className={`health-dot ${status?.status === 'failed' ? 'failed' : status?.status === 'succeeded' ? 'healthy' : ''}`} />
+                        <span className={`health-dot ${sourceHealthTone(connectionState, status?.status)}`} />
                         <div className="source-row-info">
                           <span className="source-row-name">{sourceConfig.displayName}<small className="source-kind">{sourceConfig.builtIn ? m.sourceBuiltIn : `${m.sourceCustom} · ${sourceConfig.parserType.toUpperCase()}`}</small></span>
                           <span className="source-row-meta" title={status?.error ?? undefined}>{sourceConfig.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status?.error ?? (status?.lastRunAt == null ? m.notCollected : m.topicCount(status.topicCount))}</span>
+                          <SourceConnectionTestResultView state={connectionState} locale={locale} />
                         </div>
+                        <SourceConnectionTestButton state={connectionState} locale={locale} disabled={sourceTestBatch?.running === true} onTest={() => void testSourceConfiguration(sourceConfig)} />
                         {sourceConfig.code === 'xiaohongshu' ? <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button> : null}
                         <button className="source-icon-action" type="button" title={m.sourceImport} onClick={() => void importSources(sourceConfig.code)}><Download aria-hidden="true" /></button>
                         <button className="source-icon-action" type="button" title={m.sourceExport} onClick={() => void exportSources(sourceConfig.code)}><Upload aria-hidden="true" /></button>

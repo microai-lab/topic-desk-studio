@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -18,8 +18,8 @@ use crate::error::AppError;
 use crate::models::{
     CollectionStatusEvent, HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult,
     SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences,
-    SourceConfiguration, SourceConfigurationBundle, SourceParserType, StorageOperationResult,
-    StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences,
+    SourceConfiguration, SourceConfigurationBundle, SourceConnectionTestResult, SourceParserType,
+    StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences,
 };
 use crate::repository::TopicRepository;
 use crate::translator;
@@ -118,6 +118,48 @@ pub fn list_source_configurations(
     state: State<'_, AppState>,
 ) -> Result<Vec<SourceConfiguration>, String> {
     with_repository(&state, |repository| repository.source_configurations())
+}
+
+// Enforce the diagnostic limit before dispatching blocking work, even if clients
+// bypass the UI. A dropped or panicked worker releases its permit automatically.
+static SOURCE_CONNECTION_TESTS: AtomicUsize = AtomicUsize::new(0);
+struct SourceConnectionTestPermit<'a>(&'a AtomicUsize);
+impl<'a> SourceConnectionTestPermit<'a> {
+    fn acquire(counter: &'a AtomicUsize) -> Result<Self, String> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < 3).then_some(active + 1)
+            })
+            .map(|_| Self(counter))
+            .map_err(|_| "最多同时测试 3 个数据源，请稍后重试".into())
+    }
+}
+impl Drop for SourceConnectionTestPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Test a saved source (including disabled ones) without recording collection
+/// runs. The database snapshot finishes before any blocking HTTP request starts.
+#[tauri::command]
+pub async fn test_source_connection(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<SourceConnectionTestResult, String> {
+    let (platform, proxy) = with_repository(&state, |repository| {
+        Ok((
+            repository.source_for_connection_test(&code)?,
+            repository.network_settings()?.proxy_url,
+        ))
+    })?;
+    let permit = SourceConnectionTestPermit::acquire(&SOURCE_CONNECTION_TESTS)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        collector::test_source_connection(&platform, proxy.as_deref())
+    })
+    .await
+    .map_err(|_| "数据源测试任务异常结束，请重试".to_owned())
 }
 
 /// Persist an exact user-defined order after the native layer validates the permutation.
@@ -807,6 +849,27 @@ pub async fn browser_request(
 #[cfg(test)]
 mod tests {
     use super::validate_proxy_url;
+    use super::{AtomicUsize, Ordering, SourceConnectionTestPermit};
+
+    #[test]
+    fn source_connection_tests_have_three_reusable_panic_safe_worker_slots() {
+        let counter = AtomicUsize::new(0);
+        let first = SourceConnectionTestPermit::acquire(&counter).unwrap();
+        let second = SourceConnectionTestPermit::acquire(&counter).unwrap();
+        let third = SourceConnectionTestPermit::acquire(&counter).unwrap();
+        assert_eq!(counter.load(Ordering::Acquire), 3);
+        assert!(SourceConnectionTestPermit::acquire(&counter).is_err());
+        drop(first);
+        let _replacement = SourceConnectionTestPermit::acquire(&counter).unwrap();
+        drop(second);
+        drop(third);
+        let unwind = std::panic::catch_unwind(|| {
+            let _permit = SourceConnectionTestPermit::acquire(&counter).unwrap();
+            panic!("fixture worker panic");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(counter.load(Ordering::Acquire), 1);
+    }
 
     #[test]
     fn validates_local_http_proxy_without_credentials() {

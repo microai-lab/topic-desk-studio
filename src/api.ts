@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import type { Locale } from './i18n'
-import type { HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
+import type { HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, SourceConnectionTestResult, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
 
 /** 查询本地 SQLite 中的当前话题。 */
 export async function listTopics(query: TopicQuery): Promise<TopicPage> {
@@ -37,6 +37,11 @@ export async function setPlatformEnabled(code: string, enabled: boolean): Promis
 /** Load source definitions for the native-only collection engine. */
 export async function listSourceConfigurations(): Promise<SourceConfiguration[]> {
   return invoke<SourceConfiguration[]>('list_source_configurations')
+}
+
+/** Recheck routes for this test using saved source/proxy details without changing collection settings. */
+export async function testSourceConnection(code: string): Promise<SourceConnectionTestResult> {
+  return invoke<SourceConnectionTestResult>('test_source_connection', { code })
 }
 
 /** Persist an exact custom display order for all active source definitions. */

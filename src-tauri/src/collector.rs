@@ -1,10 +1,12 @@
 //! Network collection, protocol parsing and bounded cross-platform coordination.
 
+use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::error::Error as _;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use encoding_rs::GBK;
 use regex::Regex;
@@ -18,14 +20,22 @@ use url::Url;
 use crate::catalog::{google_trends_topic_url, HUGGING_FACE_TRENDING_MODELS_ENDPOINT};
 use crate::database::open_database;
 use crate::error::{AppError, AppResult};
+#[cfg(test)]
+use crate::models::SourceProxyMode;
 use crate::models::{
-    CollectedTopic, CollectionStats, ParsedFeed, PlatformSource, SourceParserType, SourceProxyMode,
+    CollectedTopic, CollectionStats, ParsedFeed, PlatformSource, SourceConnectionTestResult,
+    SourceConnectionTestRoute, SourceConnectionTestStatus, SourceParserType,
 };
 use crate::repository::TopicRepository;
 
 const ITEMS_PER_PLATFORM: usize = 50;
 const REQUEST_TIMEOUT_SECONDS: u64 = 15;
 const MAX_WORKERS: usize = 6;
+const SOURCE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTO_COLLECTION_TIMEOUT: Duration = Duration::from_secs(60);
+// Leave budget for a fallback even when the primary endpoint needs both retries.
+const SOURCE_TEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
+const SOURCE_TEST_MAX_BYTES: usize = 8 * 1024 * 1024;
 const LEGACY_HUGGING_FACE_MODELS_ENDPOINT: &str = "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=50&expand=trendingScore,likes,downloads,createdAt,lastModified";
 // A public headline index is a bounded fallback, not a replacement for the publisher feed.
 const MIT_NEWS_INDEX_ENDPOINT: &str =
@@ -33,6 +43,219 @@ const MIT_NEWS_INDEX_ENDPOINT: &str =
 const MIT_OFFICIAL_FEED: &str = "https://www.technologyreview.com/feed/";
 const USER_AGENT_VALUE: &str =
     "TopicDeskStudio/0.1 (+https://github.com/dataelement/topic-desk-studio)";
+
+/// Auto recovery and diagnostics bound each source, including all fallbacks.
+/// Diagnostics additionally bound total bytes across routes and detail requests.
+#[derive(Clone, Copy)]
+struct SourceTestBudget {
+    deadline: Instant,
+    route_deadline: Instant,
+    bytes_left: Option<usize>,
+    diagnostic: bool,
+}
+thread_local! {
+    static SOURCE_TEST_BUDGET: Cell<Option<SourceTestBudget>> = const { Cell::new(None) };
+}
+struct SourceTestScope(Option<SourceTestBudget>);
+impl SourceTestScope {
+    fn start(diagnostic: bool) -> Self {
+        let deadline = Instant::now()
+            + if diagnostic {
+                SOURCE_TEST_TIMEOUT
+            } else {
+                AUTO_COLLECTION_TIMEOUT
+            };
+        Self(SOURCE_TEST_BUDGET.replace(Some(SourceTestBudget {
+            deadline,
+            route_deadline: deadline,
+            bytes_left: diagnostic.then_some(SOURCE_TEST_MAX_BYTES),
+            diagnostic,
+        })))
+    }
+}
+impl Drop for SourceTestScope {
+    fn drop(&mut self) {
+        SOURCE_TEST_BUDGET.set(self.0);
+    }
+}
+
+fn source_test_request_timeout() -> AppResult<Duration> {
+    SOURCE_TEST_BUDGET.with(|budget| match budget.get() {
+        Some(budget) => {
+            let remaining = budget
+                .deadline
+                .min(budget.route_deadline)
+                .saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AppError::CollectionConnection(
+                    "数据源连接或读取超时，请重试".into(),
+                ));
+            }
+            Ok(remaining.min(if budget.diagnostic {
+                SOURCE_TEST_REQUEST_TIMEOUT
+            } else {
+                Duration::from_secs(REQUEST_TIMEOUT_SECONDS)
+            }))
+        }
+        None => Ok(Duration::from_secs(REQUEST_TIMEOUT_SECONDS)),
+    })
+}
+
+/// Native requests can report their final route without exposing transport errors
+/// or causing the frontend to infer routing from human-readable error messages.
+struct RoutedSource {
+    result: AppResult<ParsedFeed>,
+    route: Option<SourceConnectionTestRoute>,
+    fallback_from: Option<SourceConnectionTestRoute>,
+}
+
+fn source_client(proxy: Option<&str>) -> AppResult<Client> {
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+        .redirect(reqwest::redirect::Policy::limited(8))
+        .no_proxy();
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy)
+                .map_err(|_| AppError::Collection("代理配置无效，请检查网络设置".into()))?,
+        );
+    }
+    builder.build().map_err(collection_error)
+}
+
+/// Only a typed connection failure can switch once. Diagnostics reassess routes
+/// independently; collection respects saved modes. Both share the same fetcher.
+fn run_source_routes(
+    platform: &PlatformSource,
+    proxy_configured: bool,
+    diagnostic: bool,
+    mut fetch: impl FnMut(SourceConnectionTestRoute) -> AppResult<ParsedFeed>,
+) -> RoutedSource {
+    let plan = match if diagnostic {
+        crate::collection_routing::diagnostic_route_plan(platform, proxy_configured)
+    } else {
+        crate::collection_routing::route_plan(platform, proxy_configured)
+    } {
+        Ok(plan) => plan,
+        Err(error) => {
+            return RoutedSource {
+                result: Err(error),
+                route: None,
+                fallback_from: None,
+            }
+        }
+    };
+    // Explicit/no-alternate collection keeps its established per-request policy;
+    // only recoverable Auto collection needs a total routing deadline.
+    if !diagnostic && plan.fallback.is_none() {
+        return RoutedSource {
+            result: fetch(plan.preferred),
+            route: Some(plan.preferred),
+            fallback_from: None,
+        };
+    }
+    let _scope = SourceTestScope::start(diagnostic);
+    if plan.fallback.is_some() {
+        SOURCE_TEST_BUDGET.with(|budget| {
+            let mut current = budget.get().expect("source scope initialized");
+            current.route_deadline = Instant::now() + SOURCE_TEST_TIMEOUT / 2;
+            budget.set(Some(current));
+        });
+    }
+    let first = fetch(plan.preferred);
+    if !matches!(first, Err(AppError::CollectionConnection(_))) || plan.fallback.is_none() {
+        return RoutedSource {
+            result: first,
+            route: Some(plan.preferred),
+            fallback_from: None,
+        };
+    }
+    let alternate = plan.fallback.expect("alternate checked");
+    SOURCE_TEST_BUDGET.with(|budget| {
+        let mut current = budget.get().expect("source scope initialized");
+        current.route_deadline = current.deadline;
+        budget.set(Some(current));
+    });
+    let second = fetch(alternate).map_err(|second| {
+        let first = first.expect_err("only a connection failure can switch");
+        AppError::Collection(format!("自动切换前：{first}；切换后：{second}"))
+    });
+    RoutedSource {
+        result: second,
+        route: Some(alternate),
+        fallback_from: Some(plan.preferred),
+    }
+}
+
+fn fetch_routed_source(
+    platform: &PlatformSource,
+    proxy: Option<&str>,
+    diagnostic: bool,
+) -> RoutedSource {
+    run_source_routes(platform, proxy.is_some(), diagnostic, |route| {
+        let client = source_client(if route == SourceConnectionTestRoute::Proxy {
+            proxy
+        } else {
+            None
+        })?;
+        fetch_source_with(platform, diagnostic, |endpoint| {
+            fetch_endpoint(&client, platform, endpoint)
+        })
+    })
+}
+
+/// Reassess routes once per transient source check, regardless of its saved mode.
+/// Empty responses are warnings; browser-session sources keep their manual workflow.
+pub fn test_source_connection(
+    platform: &PlatformSource,
+    proxy: Option<&str>,
+) -> SourceConnectionTestResult {
+    let started = Instant::now();
+    if platform.code == "xiaohongshu" {
+        return connection_test_result(platform, None, None, started, None);
+    }
+    let routed = fetch_routed_source(platform, proxy, true);
+    connection_test_result(
+        platform,
+        routed.route,
+        routed.fallback_from,
+        started,
+        Some(routed.result),
+    )
+}
+
+fn connection_test_result(
+    platform: &PlatformSource,
+    route: Option<SourceConnectionTestRoute>,
+    fallback_from: Option<SourceConnectionTestRoute>,
+    started: Instant,
+    result: Option<AppResult<ParsedFeed>>,
+) -> SourceConnectionTestResult {
+    let (status, item_count, error) = match result {
+        None => (
+            SourceConnectionTestStatus::Manual,
+            0,
+            Some("该来源依赖网页登录，请使用“登录采集”检查；连通性测试不会读取登录会话".into()),
+        ),
+        Some(Ok(feed)) if feed.topics.is_empty() => (SourceConnectionTestStatus::Empty, 0, None),
+        Some(Ok(feed)) => (SourceConnectionTestStatus::Success, feed.topics.len(), None),
+        Some(Err(error)) => (
+            SourceConnectionTestStatus::Failed,
+            0,
+            Some(error.to_string()),
+        ),
+    };
+    SourceConnectionTestResult {
+        code: platform.code.clone(),
+        status,
+        elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        item_count,
+        error,
+        route,
+        fallback_from,
+    }
+}
 
 /// Collect every enabled source with bounded concurrency and serial transactional persistence.
 pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionStats> {
@@ -59,27 +282,6 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
     }
 
     let network_settings = repository.network_settings()?;
-    let direct_client = Client::builder()
-        .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
-        .redirect(reqwest::redirect::Policy::limited(8))
-        .no_proxy()
-        .build()
-        .map_err(collection_error)?;
-    let proxy_client = network_settings
-        .proxy_url
-        .map(|proxy_url| {
-            let proxy = reqwest::Proxy::all(&proxy_url)
-                .map_err(|error| AppError::Collection(format!("代理配置无效：{error}")))?;
-            Client::builder()
-                .connect_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
-                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
-                .redirect(reqwest::redirect::Policy::limited(8))
-                .proxy(proxy)
-                .build()
-                .map_err(collection_error)
-        })
-        .transpose()?;
     let jobs = Arc::new(Mutex::new(jobs));
     let (sender, receiver) = mpsc::channel();
     let worker_count = MAX_WORKERS.min(job_count);
@@ -88,17 +290,11 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
         for _ in 0..worker_count {
             let jobs = Arc::clone(&jobs);
             let sender = sender.clone();
-            let direct_client = direct_client.clone();
-            let proxy_client = proxy_client.clone();
+            let proxy_url = network_settings.proxy_url.as_deref();
             scope.spawn(move || loop {
                 let job = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
                 let Some((platform, run_id)) = job else { break };
-                let client = if source_requires_proxy(&platform) {
-                    proxy_client.as_ref().unwrap_or(&direct_client)
-                } else {
-                    &direct_client
-                };
-                let result = fetch_source(client, &platform);
+                let result = fetch_routed_source(&platform, proxy_url, false).result;
                 if sender.send((platform, run_id, result)).is_err() {
                     break;
                 }
@@ -132,12 +328,20 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
 
 /// Route only sources proven unreliable on direct mainland connections through
 /// the explicit proxy; all others keep their original geographic response.
+#[cfg(test)]
 fn source_requires_proxy(platform: &PlatformSource) -> bool {
     match platform.proxy_mode {
         SourceProxyMode::Proxy => true,
         SourceProxyMode::Direct => false,
         SourceProxyMode::Auto => crate::catalog::default_proxy_mode(&platform.code) == "proxy",
     }
+}
+
+#[cfg(test)]
+fn source_test_route(platform: &PlatformSource, proxy: Option<&str>) -> SourceConnectionTestRoute {
+    crate::collection_routing::route_plan(platform, proxy.is_some())
+        .unwrap()
+        .preferred
 }
 
 /// Resolve shipped endpoint repairs while preserving every user-customized URL.
@@ -168,29 +372,67 @@ fn source_endpoints(platform: &PlatformSource) -> Vec<&str> {
 }
 
 /// Fetch one source with known fallbacks and reject an apparently successful empty parse.
-fn fetch_source(client: &Client, platform: &PlatformSource) -> AppResult<ParsedFeed> {
+/// Keep collection's endpoint ordering and bounded empty-cache retry behavior in
+/// diagnostics. Tests retain empty parsed feeds to distinguish them from failures.
+fn fetch_source_with(
+    platform: &PlatformSource,
+    keep_empty: bool,
+    mut fetch: impl FnMut(&str) -> AppResult<ParsedFeed>,
+) -> AppResult<ParsedFeed> {
     let endpoints = source_endpoints(platform);
     let mut failures = Vec::new();
+    let mut empty_feed = None;
+    let mut connection_only = true;
     for endpoint in endpoints {
         for empty_attempt in 0..2 {
-            match fetch_endpoint(client, platform, endpoint) {
+            match fetch(endpoint) {
                 Ok(feed) if !feed.topics.is_empty() => return Ok(feed),
                 Ok(_) if empty_attempt == 0 && endpoint.contains("news.orz.ai") => {
+                    connection_only = false;
                     // The aggregator briefly publishes an empty list while
                     // rotating its cache; retry once before declaring failure.
-                    std::thread::sleep(Duration::from_millis(800));
+                    let remaining = source_test_request_timeout()
+                        .map_err(|error| AppError::Collection(error.to_string()))?;
+                    std::thread::sleep(Duration::from_millis(800).min(remaining));
                     continue;
                 }
-                Ok(_) if platform.code == "xiaohongshu" => failures
-                    .push("xiaohongshu 页面已改为动态签名加载，公开 HTML 不含热点数据".into()),
-                Ok(_) => failures.push(format!("{} 未解析到有效热点", platform.code)),
-                Err(AppError::Collection(message)) => failures.push(message),
-                Err(error) => failures.push(error.to_string()),
+                Ok(feed) => {
+                    connection_only = false;
+                    empty_feed = Some(feed);
+                    failures.push(if platform.code == "xiaohongshu" {
+                        "xiaohongshu 页面已改为动态签名加载，公开 HTML 不含热点数据".into()
+                    } else {
+                        format!("{} 未解析到有效热点", platform.code)
+                    });
+                }
+                Err(AppError::Collection(message)) => {
+                    connection_only = false;
+                    empty_feed = None;
+                    failures.push(message);
+                }
+                Err(AppError::CollectionConnection(message)) => {
+                    empty_feed = None;
+                    failures.push(message);
+                }
+                Err(error) => {
+                    connection_only = false;
+                    empty_feed = None;
+                    failures.push(error.to_string());
+                }
             }
             break;
         }
     }
-    Err(AppError::Collection(failures.join("；")))
+    if keep_empty {
+        if let Some(feed) = empty_feed {
+            return Ok(feed);
+        }
+    }
+    Err(if connection_only {
+        AppError::CollectionConnection(failures.join("；"))
+    } else {
+        AppError::Collection(failures.join("；"))
+    })
 }
 
 /// Dispatch protocol-specific endpoints while keeping all output in one normalized model.
@@ -212,7 +454,7 @@ fn fetch_endpoint(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let bytes = response.bytes().map_err(collection_error)?;
+    let bytes = response_bytes(response)?;
     if platform.code == "mit-technology-review" && endpoint == MIT_NEWS_INDEX_ENDPOINT {
         return parse_mit_news_index(&bytes);
     }
@@ -268,6 +510,56 @@ fn fetch_endpoint(
     parse_feed(&platform.code, &bytes)
 }
 
+/// Bound total diagnostic response bytes across all fallback and detail requests;
+/// regular collection retains its established behavior.
+fn response_bytes(response: Response) -> AppResult<Vec<u8>> {
+    let Some(budget) = SOURCE_TEST_BUDGET
+        .get()
+        .filter(|budget| budget.bytes_left.is_some())
+    else {
+        return response
+            .bytes()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| request_error("数据源", "", error));
+    };
+    let remaining = budget.bytes_left.expect("diagnostic byte budget checked");
+    let bytes = read_test_response(response, remaining)?;
+    SOURCE_TEST_BUDGET.set(Some(SourceTestBudget {
+        bytes_left: Some(remaining - bytes.len()),
+        ..budget
+    }));
+    Ok(bytes)
+}
+
+fn read_test_response(reader: impl Read, limit: usize) -> AppResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let read = reader.take(limit as u64 + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > limit {
+        // A reset after a partial body still consumed its byte allowance; a new
+        // route must not receive a fresh 8 MiB budget for the same diagnostic.
+        SOURCE_TEST_BUDGET.with(|budget| {
+            if let Some(mut current) = budget.get() {
+                current.bytes_left = current
+                    .bytes_left
+                    .map(|left| left.saturating_sub(bytes.len()));
+                budget.set(Some(current));
+            }
+        });
+    }
+    read.map_err(|error| {
+        let message = "读取数据源响应失败或超时".into();
+        if connection_error_chain(&error) {
+            AppError::CollectionConnection(message)
+        } else {
+            AppError::Collection(message)
+        }
+    })?;
+    if bytes.len() > limit {
+        return Err(AppError::Collection("数据源测试响应超过 8 MiB 限制".into()));
+    }
+    Ok(bytes)
+}
+
 /// Apply source-specific request headers while keeping redirects and timeouts centralized.
 fn request(client: &Client, code: &str, endpoint: &str) -> AppResult<Response> {
     let mut headers = HeaderMap::new();
@@ -300,7 +592,13 @@ fn request(client: &Client, code: &str, endpoint: &str) -> AppResult<Response> {
     }
     let mut response = None;
     for attempt in 0..2 {
-        match client.get(endpoint).headers(headers.clone()).send() {
+        let timeout = source_test_request_timeout()?;
+        match client
+            .get(endpoint)
+            .headers(headers.clone())
+            .timeout(timeout)
+            .send()
+        {
             Ok(value) => {
                 response = Some(value);
                 break;
@@ -318,6 +616,7 @@ fn request(client: &Client, code: &str, endpoint: &str) -> AppResult<Response> {
 
 /// Reduce reqwest's nested transport errors to actionable, non-sensitive diagnostics.
 fn request_error(code: &str, endpoint: &str, error: reqwest::Error) -> AppError {
+    let connection = !error.is_status() && connection_error_chain(&error);
     let host = Url::parse(endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
@@ -351,7 +650,42 @@ fn request_error(code: &str, endpoint: &str, error: reqwest::Error) -> AppError 
     } else {
         "网络请求失败".into()
     };
-    AppError::Collection(format!("{code} · {host}：{detail}"))
+    let message = format!("{code} · {host}：{detail}");
+    if connection {
+        AppError::CollectionConnection(message)
+    } else {
+        AppError::Collection(message)
+    }
+}
+
+/// Inspect typed causes only. Words in a URL, parser error, or HTTP body must
+/// never authorize sending a request through a different network route.
+fn connection_error_chain(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_connect() || error.is_timeout())
+        {
+            return true;
+        }
+        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        }) {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
 }
 
 /// Parse RSS, Atom and RDF feeds using a tolerant standards-aware parser.
@@ -962,15 +1296,21 @@ fn fetch_hacker_news(
     platform: &PlatformSource,
     base: &str,
 ) -> AppResult<ParsedFeed> {
-    let ids: Vec<Value> = request(client, &platform.code, &format!("{base}/topstories.json"))?
-        .json()
-        .map_err(collection_error)?;
+    let ids: Vec<Value> = serde_json::from_slice(&response_bytes(request(
+        client,
+        &platform.code,
+        &format!("{base}/topstories.json"),
+    )?)?)
+    .map_err(collection_error)?;
     let mut topics = Vec::new();
     let fetched_count = ids.len().min(ITEMS_PER_PLATFORM) as u32;
     for (index, id) in ids.into_iter().take(ITEMS_PER_PLATFORM).enumerate() {
-        let item: Value = request(client, &platform.code, &format!("{base}/item/{id}.json"))?
-            .json()
-            .map_err(collection_error)?;
+        let item: Value = serde_json::from_slice(&response_bytes(request(
+            client,
+            &platform.code,
+            &format!("{base}/item/{id}.json"),
+        )?)?)
+        .map_err(collection_error)?;
         let url = text(item.get("url"))
             .or_else(|| Some(format!("https://news.ycombinator.com/item?id={id}")));
         if let Some(topic) = make_topic(
@@ -1006,9 +1346,12 @@ fn fetch_wikipedia(
         u8::from(yesterday.month()),
         yesterday.day()
     );
-    let payload: Value = request(client, &platform.code, &endpoint)?
-        .json()
-        .map_err(collection_error)?;
+    let payload: Value = serde_json::from_slice(&response_bytes(request(
+        client,
+        &platform.code,
+        &endpoint,
+    )?)?)
+    .map_err(collection_error)?;
     let language = if platform.code.ends_with("-zh") {
         "zh"
     } else {
@@ -1224,6 +1567,483 @@ fn collection_error(error: impl std::fmt::Display) -> AppError {
 mod tests {
     use super::*;
     use crate::models::CustomParserConfig;
+
+    fn diagnostic_platform(code: &str) -> PlatformSource {
+        PlatformSource {
+            id: 7,
+            code: code.into(),
+            endpoint_url: "https://example.org/feed".into(),
+            parser_type: SourceParserType::Rss,
+            parser_config: Default::default(),
+            proxy_mode: SourceProxyMode::Auto,
+        }
+    }
+
+    fn fixture_feed(code: &str) -> ParsedFeed {
+        parse_feed(code, include_bytes!("../../tests/fixtures/qbitai.xml")).unwrap()
+    }
+
+    #[test]
+    fn auto_recovers_from_typed_transport_failures_in_both_directions_once() {
+        use SourceConnectionTestRoute::{Direct, Proxy};
+        for (code, routes) in [("qbitai", [Direct, Proxy]), ("github", [Proxy, Direct])] {
+            for diagnostic in [true, false] {
+                let source = diagnostic_platform(code);
+                let mut attempts = Vec::new();
+                let routed = run_source_routes(&source, true, diagnostic, |route| {
+                    attempts.push(route);
+                    if attempts.len() == 1 {
+                        Err(AppError::CollectionConnection(
+                            "fixture transport error".into(),
+                        ))
+                    } else {
+                        Ok(fixture_feed(code))
+                    }
+                });
+                assert_eq!(attempts, routes);
+                assert!(routed.result.is_ok());
+                assert_eq!(routed.route, Some(routes[1]));
+                assert_eq!(routed.fallback_from, Some(routes[0]));
+                assert!(SOURCE_TEST_BUDGET.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn auto_never_switches_for_http_parse_or_empty_results_or_error_words() {
+        use SourceConnectionTestRoute::Direct;
+        let source = diagnostic_platform("qbitai");
+        for text in [
+            "HTTP 401",
+            "HTTP 403",
+            "HTTP 404",
+            "HTTP 429",
+            "HTTP 503",
+            "Feed 无效",
+            "https://tls.example.com DNS reset timeout",
+        ] {
+            let mut attempts = 0;
+            let routed = run_source_routes(&source, true, true, |route| {
+                attempts += 1;
+                assert_eq!(route, Direct);
+                Err(AppError::Collection(text.into()))
+            });
+            assert_eq!(attempts, 1, "{text}");
+            assert!(routed.fallback_from.is_none());
+        }
+        let mut attempts = 0;
+        let routed = run_source_routes(&source, true, true, |_| {
+            attempts += 1;
+            Ok(ParsedFeed {
+                topics: vec![],
+                fetched_count: 0,
+                invalid_count: 0,
+            })
+        });
+        assert_eq!(attempts, 1);
+        assert!(routed.result.unwrap().topics.is_empty());
+        assert!(routed.fallback_from.is_none());
+    }
+
+    #[test]
+    fn explicit_collection_modes_missing_proxy_and_local_auto_cannot_switch_routes() {
+        for mode in [SourceProxyMode::Direct, SourceProxyMode::Proxy] {
+            let mut source = diagnostic_platform("qbitai");
+            source.proxy_mode = mode;
+            let mut attempts = Vec::new();
+            let routed = run_source_routes(&source, true, false, |route| {
+                attempts.push(route);
+                Err(AppError::CollectionConnection("fixture".into()))
+            });
+            assert_eq!(attempts.len(), 1);
+            assert!(routed.fallback_from.is_none());
+            if mode == SourceProxyMode::Proxy {
+                let absent = run_source_routes(&source, false, false, |_| {
+                    panic!("missing proxy must not request")
+                });
+                assert!(absent.route.is_none());
+                assert!(absent
+                    .result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("请先保存代理地址"));
+            }
+        }
+        let mut source = diagnostic_platform("qbitai");
+        source.endpoint_url = "http://localhost/feed".into();
+        let mut attempts = 0;
+        let routed = run_source_routes(&source, true, true, |_| {
+            attempts += 1;
+            Err(AppError::CollectionConnection("fixture".into()))
+        });
+        assert_eq!(attempts, 1);
+        assert!(routed.fallback_from.is_none());
+    }
+
+    #[test]
+    fn every_diagnostic_restarts_route_judgment_without_rewriting_saved_modes() {
+        use SourceConnectionTestRoute::{Direct, Proxy};
+        for mode in [
+            SourceProxyMode::Direct,
+            SourceProxyMode::Proxy,
+            SourceProxyMode::Auto,
+        ] {
+            for (code, expected) in [("qbitai", [Direct, Proxy]), ("github", [Proxy, Direct])] {
+                let mut source = diagnostic_platform(code);
+                source.proxy_mode = mode;
+                let mut all_attempts = Vec::new();
+                for _ in 0..2 {
+                    let mut attempt = 0;
+                    let routed = run_source_routes(&source, true, true, |route| {
+                        all_attempts.push(route);
+                        attempt += 1;
+                        if attempt == 1 {
+                            Err(AppError::CollectionConnection("fixture reset".into()))
+                        } else {
+                            Ok(fixture_feed(code))
+                        }
+                    });
+                    assert!(routed.result.is_ok());
+                    assert_eq!(routed.route, Some(expected[1]));
+                    assert_eq!(routed.fallback_from, Some(expected[0]));
+                    assert_eq!(source.proxy_mode, mode);
+                    assert!(SOURCE_TEST_BUDGET.get().is_none());
+                }
+                assert_eq!(all_attempts, [expected, expected].concat());
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_probe_direct_when_no_proxy_exists_and_do_not_proxy_local_sources() {
+        let mut source = diagnostic_platform("github");
+        source.proxy_mode = SourceProxyMode::Proxy;
+        let mut attempts = Vec::new();
+        let routed = run_source_routes(&source, false, true, |route| {
+            attempts.push(route);
+            Ok(fixture_feed(&source.code))
+        });
+        assert_eq!(attempts, [SourceConnectionTestRoute::Direct]);
+        assert!(routed.result.is_ok());
+        assert_eq!(routed.route, Some(SourceConnectionTestRoute::Direct));
+        assert!(routed.fallback_from.is_none());
+        assert_eq!(source.proxy_mode, SourceProxyMode::Proxy);
+        for endpoint in [
+            "http://localhost/feed",
+            "http://127.0.0.1/feed",
+            "http://[::1]/feed",
+            "http://10.1.1.1/feed",
+        ] {
+            source.endpoint_url = endpoint.into();
+            let mut attempts = Vec::new();
+            let routed = run_source_routes(&source, true, true, |route| {
+                attempts.push(route);
+                Err(AppError::CollectionConnection("fixture reset".into()))
+            });
+            assert_eq!(attempts, [SourceConnectionTestRoute::Direct]);
+            assert_eq!(routed.route, Some(SourceConnectionTestRoute::Direct));
+            assert!(routed.fallback_from.is_none());
+            assert_eq!(source.proxy_mode, SourceProxyMode::Proxy);
+        }
+    }
+
+    #[test]
+    fn a_failed_alternate_reports_both_failures_and_serializes_actual_route() {
+        let source = diagnostic_platform("qbitai");
+        let routed = run_source_routes(&source, true, true, |route| match route {
+            SourceConnectionTestRoute::Direct => {
+                Err(AppError::CollectionConnection("direct TLS failure".into()))
+            }
+            SourceConnectionTestRoute::Proxy => Err(AppError::Collection("HTTP 403".into())),
+        });
+        let result = connection_test_result(
+            &source,
+            routed.route,
+            routed.fallback_from,
+            Instant::now(),
+            Some(routed.result),
+        );
+        assert_eq!(result.status, SourceConnectionTestStatus::Failed);
+        let error = result.error.as_deref().unwrap();
+        assert!(error.contains("direct TLS failure") && error.contains("HTTP 403"));
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["route"], "proxy");
+        assert_eq!(json["fallbackFrom"], "direct");
+    }
+
+    #[test]
+    fn budgets_reserve_an_alternate_without_shortening_explicit_collection() {
+        let source = diagnostic_platform("qbitai");
+        for diagnostic in [true, false] {
+            let mut attempts = 0;
+            let result = run_source_routes(&source, true, diagnostic, |_| {
+                attempts += 1;
+                let budget = SOURCE_TEST_BUDGET.get().unwrap();
+                if attempts == 1 {
+                    assert!(budget.route_deadline < budget.deadline);
+                    assert!(
+                        budget.route_deadline.duration_since(Instant::now())
+                            <= Duration::from_secs(15)
+                    );
+                    Err(AppError::CollectionConnection("fixture".into()))
+                } else {
+                    assert_eq!(budget.route_deadline, budget.deadline);
+                    assert_eq!(
+                        budget.bytes_left,
+                        diagnostic.then_some(SOURCE_TEST_MAX_BYTES)
+                    );
+                    Ok(fixture_feed(&source.code))
+                }
+            });
+            assert!(result.result.is_ok());
+        }
+        let mut explicit = source;
+        explicit.proxy_mode = SourceProxyMode::Direct;
+        run_source_routes(&explicit, true, false, |_| {
+            assert!(SOURCE_TEST_BUDGET.get().is_none());
+            Ok(fixture_feed(&explicit.code))
+        });
+        run_source_routes(&explicit, false, true, |_| {
+            let budget = SOURCE_TEST_BUDGET.get().unwrap();
+            assert_eq!(budget.route_deadline, budget.deadline);
+            Ok(fixture_feed(&explicit.code))
+        });
+    }
+
+    #[test]
+    fn typed_connection_detection_ignores_error_messages_and_identifies_reset_causes() {
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            assert!(connection_error_chain(&std::io::Error::new(
+                kind,
+                "no keywords"
+            )));
+        }
+        assert!(!connection_error_chain(&std::io::Error::other(
+            "TLS DNS timeout reset https://tls.example.com"
+        )));
+        assert!(!connection_error_chain(&AppError::Collection(
+            "TLS 安全连接失败".into()
+        )));
+        let platform = diagnostic_platform("36kr");
+        let result = fetch_source_with(&platform, true, |endpoint| {
+            if endpoint == platform.endpoint_url {
+                Err(AppError::Collection("HTTP 403".into()))
+            } else {
+                Err(AppError::CollectionConnection("TLS failure".into()))
+            }
+        });
+        assert!(matches!(result, Err(AppError::Collection(_))));
+    }
+
+    #[test]
+    fn a_partial_body_reset_consumes_the_shared_diagnostic_byte_budget() {
+        struct Partial(bool);
+        impl Read for Partial {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "fixture",
+                    ));
+                }
+                self.0 = true;
+                output[..2].copy_from_slice(b"ab");
+                Ok(2)
+            }
+        }
+        let _scope = SourceTestScope::start(true);
+        assert!(matches!(
+            read_test_response(Partial(false), SOURCE_TEST_MAX_BYTES),
+            Err(AppError::CollectionConnection(_))
+        ));
+        assert_eq!(
+            SOURCE_TEST_BUDGET.get().unwrap().bytes_left,
+            Some(SOURCE_TEST_MAX_BYTES - 2)
+        );
+    }
+
+    #[test]
+    fn connection_test_uses_fallback_data_and_preserves_collection_empty_policy() {
+        let platform = diagnostic_platform("36kr");
+        let endpoints = std::cell::RefCell::new(Vec::new());
+        let feed = fetch_source_with(&platform, true, |endpoint| {
+            endpoints.borrow_mut().push(endpoint.to_owned());
+            if endpoint.contains("news.orz.ai") {
+                parse_feed(
+                    &platform.code,
+                    include_bytes!("../../tests/fixtures/qbitai.xml"),
+                )
+            } else {
+                Err(AppError::Collection("HTTP 403".into()))
+            }
+        })
+        .unwrap();
+        assert!(!feed.topics.is_empty());
+        assert_eq!(*endpoints.borrow(), source_endpoints(&platform));
+        let platform = diagnostic_platform("custom-rss");
+        let empty = || {
+            Ok(ParsedFeed {
+                topics: vec![],
+                fetched_count: 0,
+                invalid_count: 0,
+            })
+        };
+        let parsed = fetch_source_with(&platform, true, |_| empty()).unwrap();
+        let result = connection_test_result(
+            &platform,
+            Some(SourceConnectionTestRoute::Direct),
+            None,
+            Instant::now(),
+            Some(Ok(parsed)),
+        );
+        assert_eq!(result.status, SourceConnectionTestStatus::Empty);
+        assert_eq!(result.item_count, 0);
+        assert!(fetch_source_with(&platform, false, |_| empty()).is_err());
+    }
+
+    #[test]
+    fn connection_test_classifies_parsed_data_http_failures_and_verification_pages() {
+        let platform = diagnostic_platform("qbitai");
+        let parsed = parse_feed(
+            &platform.code,
+            include_bytes!("../../tests/fixtures/qbitai.xml"),
+        );
+        let result = connection_test_result(
+            &platform,
+            Some(SourceConnectionTestRoute::Proxy),
+            None,
+            Instant::now(),
+            Some(parsed),
+        );
+        assert_eq!(result.status, SourceConnectionTestStatus::Success);
+        assert!(result.item_count > 0);
+        assert!(result.error.is_none());
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["route"], "proxy");
+        assert_eq!(json["status"], "success");
+        assert!(json.get("elapsedMs").is_some());
+        assert!(json.get("itemCount").is_some());
+        for failure in [
+            Err(AppError::Collection("HTTP 403 Forbidden".into())),
+            parse_feed(
+                &platform.code,
+                b"<html><title>Verify you are human</title></html>",
+            ),
+        ] {
+            let result = connection_test_result(
+                &platform,
+                Some(SourceConnectionTestRoute::Direct),
+                None,
+                Instant::now(),
+                Some(failure),
+            );
+            assert_eq!(result.status, SourceConnectionTestStatus::Failed);
+            assert!(result.error.is_some());
+            assert_eq!(result.item_count, 0);
+        }
+    }
+
+    #[test]
+    fn browser_session_sources_never_make_a_network_probe_or_claim_success() {
+        for mode in [
+            SourceProxyMode::Direct,
+            SourceProxyMode::Proxy,
+            SourceProxyMode::Auto,
+        ] {
+            let mut source = diagnostic_platform("xiaohongshu");
+            source.proxy_mode = mode;
+            let result = test_source_connection(&source, Some("invalid-proxy"));
+            assert_eq!(result.status, SourceConnectionTestStatus::Manual);
+            assert!(result.route.is_none());
+            assert!(result.fallback_from.is_none());
+            assert_eq!(result.item_count, 0);
+            assert!(result.error.as_deref().unwrap().contains("登录采集"));
+            assert_eq!(source.proxy_mode, mode);
+        }
+    }
+
+    #[test]
+    fn connection_test_resolves_the_same_proxy_routes_as_collection() {
+        let mut platform = diagnostic_platform("github");
+        let proxy = Some("http://127.0.0.1:7897");
+        assert_eq!(
+            source_test_route(&platform, proxy),
+            SourceConnectionTestRoute::Proxy
+        );
+        assert_eq!(
+            source_test_route(&platform, None),
+            SourceConnectionTestRoute::Direct
+        );
+        platform.proxy_mode = SourceProxyMode::Direct;
+        assert_eq!(
+            source_test_route(&platform, proxy),
+            SourceConnectionTestRoute::Direct
+        );
+        platform.code = "qbitai".into();
+        platform.proxy_mode = SourceProxyMode::Auto;
+        assert_eq!(
+            source_test_route(&platform, proxy),
+            SourceConnectionTestRoute::Direct
+        );
+        platform.proxy_mode = SourceProxyMode::Proxy;
+        assert_eq!(
+            source_test_route(&platform, proxy),
+            SourceConnectionTestRoute::Proxy
+        );
+    }
+
+    #[test]
+    fn an_empty_primary_does_not_hide_a_later_timeout_or_response_failure() {
+        let platform = diagnostic_platform("36kr");
+        let result = fetch_source_with(&platform, true, |endpoint| {
+            if endpoint == platform.endpoint_url {
+                Ok(ParsedFeed {
+                    topics: vec![],
+                    fetched_count: 0,
+                    invalid_count: 0,
+                })
+            } else {
+                Err(AppError::Collection("读取数据源响应失败或超时".into()))
+            }
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn connection_test_deadlines_and_body_limits_are_enforced_and_scoped() {
+        assert!(SOURCE_TEST_BUDGET.get().is_none());
+        {
+            let _scope = SourceTestScope::start(true);
+            assert_eq!(
+                SOURCE_TEST_BUDGET.get().unwrap().bytes_left,
+                Some(SOURCE_TEST_MAX_BYTES)
+            );
+            assert!(source_test_request_timeout().unwrap() <= Duration::from_secs(15));
+            SOURCE_TEST_BUDGET.set(Some(SourceTestBudget {
+                deadline: Instant::now() - Duration::from_millis(1),
+                route_deadline: Instant::now(),
+                bytes_left: Some(0),
+                diagnostic: true,
+            }));
+            assert!(source_test_request_timeout().is_err());
+        }
+        assert!(SOURCE_TEST_BUDGET.get().is_none());
+        assert_eq!(read_test_response(&b"1234"[..], 4).unwrap(), b"1234");
+        assert!(read_test_response(&b"12345"[..], 4).is_err());
+        assert!(read_test_response(&b"x"[..], 0).is_err());
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture failure"))
+            }
+        }
+        assert!(read_test_response(Broken, 4).is_err());
+    }
 
     /// The shipped fixtures protect RSS and Atom compatibility independently of network access.
     #[test]

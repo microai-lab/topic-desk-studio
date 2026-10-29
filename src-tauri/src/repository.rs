@@ -801,6 +801,52 @@ impl<'connection> TopicRepository<'connection> {
             .optional()?)
     }
 
+    /// Snapshot a saved source for a read-only connectivity test. Disabled sources
+    /// remain testable; deleted or unknown definitions must never trigger a request.
+    pub fn source_for_connection_test(&self, code: &str) -> AppResult<PlatformSource> {
+        let code = code.trim();
+        if !(2..=48).contains(&code.len())
+            || !code
+                .bytes()
+                .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == b'-')
+        {
+            return Err(AppError::InvalidInput(
+                "来源代码需为 2–48 位小写字母、数字或连字符".into(),
+            ));
+        }
+        let (id, code, endpoint_url, parser_type, parser_config, proxy_mode) = self
+            .connection
+            .query_row(
+                "SELECT id, code, feed_url, parser_type, parser_config, proxy_mode FROM platform
+                 WHERE deleted = 0 AND code = ?",
+                [code],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::InvalidInput("数据来源不存在或已删除".into()))?;
+        Ok(PlatformSource {
+            id,
+            code,
+            endpoint_url,
+            parser_type: parse_parser_type(&parser_type)?,
+            parser_config: parser_config
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| AppError::Initialization(format!("数据源解析配置损坏：{error}")))?
+                .unwrap_or_default(),
+            proxy_mode: parse_proxy_mode(&proxy_mode)?,
+        })
+    }
+
     /// Load enabled sources before collection so no database lock is held during HTTP requests.
     pub fn enabled_platforms(&self) -> AppResult<Vec<PlatformSource>> {
         let mut statement = self.connection.prepare(
@@ -1341,6 +1387,140 @@ mod tests {
             )
             .expect("platform should insert");
         connection
+    }
+
+    #[test]
+    fn connectivity_snapshot_reads_disabled_sources_without_changing_topics_runs_or_metadata() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let run = repository.create_run(platform.id, "manual").unwrap();
+        repository
+            .commit_feed(
+                &platform,
+                run,
+                &ParsedFeed {
+                    topics: vec![CollectedTopic {
+                        platform_code: platform.code.clone(),
+                        stable_id: Some("existing".into()),
+                        title: "Existing headline".into(),
+                        url: "https://www.qbitai.com/existing".into(),
+                        published_time: None,
+                        rank: 1,
+                        heat: None,
+                    }],
+                    fetched_count: 1,
+                    invalid_count: 0,
+                },
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE platform SET enabled = 0, feed_url = 'https://example.org/custom.json',
+             parser_type = 'json', parser_config = ?, proxy_mode = 'direct' WHERE code = 'qbitai'",
+                [r#"{"itemsPath":"items","titlePath":"title","urlPath":"link"}"#],
+            )
+            .unwrap();
+        let changes_before = connection.total_changes();
+        let metadata_before: (String, Option<i64>) = connection
+            .query_row(
+                "SELECT update_time, last_success_run_id FROM platform WHERE code = 'qbitai'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        let saved = repository.source_for_connection_test("  qbitai\n").unwrap();
+        assert_eq!(saved.id, platform.id);
+        assert_eq!(saved.code, "qbitai");
+        assert_eq!(saved.endpoint_url, "https://example.org/custom.json");
+        assert_eq!(saved.parser_type, SourceParserType::Json);
+        assert_eq!(saved.proxy_mode, SourceProxyMode::Direct);
+        assert_eq!(saved.parser_config.items_path.as_deref(), Some("items"));
+        assert_eq!(saved.parser_config.title_path.as_deref(), Some("title"));
+        assert_eq!(saved.parser_config.url_path.as_deref(), Some("link"));
+        assert!(repository.enabled_platforms().unwrap().is_empty());
+        assert_eq!(connection.total_changes(), changes_before);
+        let metadata_after: (String, Option<i64>) = connection
+            .query_row(
+                "SELECT update_time, last_success_run_id FROM platform WHERE code = 'qbitai'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(metadata_after, metadata_before);
+        for table in ["topic", "collection_run"] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1,
+            );
+        }
+    }
+
+    #[test]
+    fn connectivity_snapshot_rejects_invalid_unknown_and_deleted_sources_and_accepts_boundaries() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        for code in [
+            "",
+            " ",
+            "a",
+            "UPPER",
+            "中文",
+            "source/key",
+            "x';--",
+            &"a".repeat(49),
+        ] {
+            assert!(matches!(
+                repository.source_for_connection_test(code),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            repository.source_for_connection_test("unknown"),
+            Err(AppError::InvalidInput(_))
+        ));
+        connection
+            .execute("UPDATE platform SET deleted = 1 WHERE code = 'qbitai'", [])
+            .unwrap();
+        assert!(matches!(
+            repository.source_for_connection_test("qbitai"),
+            Err(AppError::InvalidInput(_))
+        ));
+        for code in ["ab".to_owned(), "a".repeat(48)] {
+            connection.execute(
+                "INSERT INTO platform (code, display_name, home_url, feed_url) VALUES (?, 'Test', 'https://example.org', 'https://example.org/feed')",
+                [&code],
+            ).unwrap();
+            let saved = repository.source_for_connection_test(&code).unwrap();
+            assert_eq!(saved.code, code);
+            assert_eq!(saved.parser_type, SourceParserType::Builtin);
+            assert_eq!(saved.proxy_mode, SourceProxyMode::Auto);
+            assert!(saved.parser_config.title_path.is_none());
+        }
+    }
+
+    #[test]
+    fn connectivity_snapshot_rejects_corrupt_saved_parser_or_proxy_configuration() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        for (parser, config, proxy) in [
+            ("executable", None, "auto"),
+            ("json", Some("{"), "auto"),
+            ("builtin", None, "invalid"),
+        ] {
+            connection.execute(
+                "UPDATE platform SET parser_type = ?, parser_config = ?, proxy_mode = ? WHERE code = 'qbitai'",
+                params![parser, config, proxy],
+            ).unwrap();
+            assert!(matches!(
+                repository.source_for_connection_test("qbitai"),
+                Err(AppError::Initialization(_))
+            ));
+        }
     }
 
     #[test]

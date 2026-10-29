@@ -1183,3 +1183,41 @@ button.browser-download-copy:disabled { cursor: default; }
 .browser-tab-media.is-muted { color: var(--muted); }
 .browser-tab-media:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .browser-tab.pinned.has-media { min-width: 64px; max-width: 64px; flex-basis: 64px; }
+
+/* Connection diagnostics stay separate from the last collection result and reveal complete errors. */
+.source-settings { container: source-settings / inline-size; }
+.source-batch-actions .source-batch-test:disabled { opacity: .6; cursor: default; border-color: var(--border); background: var(--surface); }
+.source-batch-actions .source-batch-test.is-testing:disabled { cursor: wait; }
+.source-connection-button { flex: none; }
+.source-connection-button.is-testing:disabled { opacity: .65; cursor: wait; }
+.source-connection-button.is-testing svg, .source-batch-test.is-testing svg { animation: spin .8s linear infinite; }
+.source-connection-result { display: flex; flex-direction: column; gap: 2px; margin-top: 3px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.source-connection-summary { display: flex; align-items: center; flex-wrap: wrap; column-gap: 4px; }
+.source-connection-summary svg { flex: none; width: 13px; height: 13px; }
+.source-connection-summary strong { font-weight: 500; }
+.source-connection-result.success { color: var(--green); }
+.source-connection-result.failed { color: color-mix(in srgb, #cf3c3c 65%, var(--ink)); }
+.source-connection-result.warning { color: var(--muted); }
+.source-connection-error { white-space: normal; overflow-wrap: anywhere; user-select: text; }
+.source-connection-summary-dialog { width: min(440px, calc(100vw - 40px)); }
+.source-connection-summary-dialog > p { color: var(--muted); }
+.source-connection-summary-dialog .storage-confirmation-actions button { border: 1px solid var(--accent); border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.source-connection-summary-dialog .storage-confirmation-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.source-connection-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0 0; }
+.source-connection-summary-stat { display: grid; gap: 7px; min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.source-connection-summary-stat dt { color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.source-connection-summary-stat dd { margin: 0; color: var(--ink); font-size: 28px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.source-connection-summary-stat.success dd { color: var(--green); }
+.source-connection-summary-stat.failed dd { color: color-mix(in srgb, #cf3c3c 65%, var(--ink)); }
+@container source-settings (max-width: 560px) {
+  .source-row { flex-wrap: wrap; gap: 8px; }
+  .source-row-info { flex-basis: calc(100% - 72px); }
+  .source-row-name { overflow-wrap: anywhere; }
+  .source-kind { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .source-connection-button.is-testing svg, .source-batch-test.is-testing svg { animation: none; }
+}
+
+/* Explain automatic collection routing beside its setting. */
+.source-network-help { color: var(--muted); font-size: 11.5px; line-height: 1.5; font-weight: 400; }

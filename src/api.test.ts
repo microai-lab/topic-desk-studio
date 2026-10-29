@@ -1,11 +1,34 @@
 /** Browser lifecycle requests must remain ordered even when a native call fails. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
-import { browserControl, browserRequest } from './api'
+import { browserControl, browserRequest, testSourceConnection } from './api'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 afterEach(() => vi.mocked(invoke).mockReset())
+
+it('tests only a saved source by code through the native boundary', async () => {
+  const result = { code: 'techcrunch', status: 'success', elapsedMs: 520, itemCount: 12, error: null, route: 'proxy' }
+  vi.mocked(invoke).mockResolvedValueOnce(result)
+  await expect(testSourceConnection('techcrunch')).resolves.toEqual(result)
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('test_source_connection', { code: 'techcrunch' })
+})
+
+it('preserves native source diagnostic validation failures', async () => {
+  vi.mocked(invoke).mockRejectedValueOnce(new Error('unknown source'))
+  await expect(testSourceConnection('missing')).rejects.toThrow('unknown source')
+})
+
+it('sends a fresh diagnostic on every refresh rather than reusing a previous result', async () => {
+  const direct = { code: 'qbitai', status: 'success', elapsedMs: 20, itemCount: 10, error: null, route: 'direct', fallbackFrom: null }
+  const proxy = { ...direct, route: 'proxy', fallbackFrom: 'direct' }
+  vi.mocked(invoke).mockResolvedValueOnce(direct).mockResolvedValueOnce(proxy)
+  await expect(testSourceConnection('qbitai')).resolves.toEqual(direct)
+  await expect(testSourceConnection('qbitai')).resolves.toEqual(proxy)
+  expect(invoke).toHaveBeenCalledTimes(2)
+  expect(invoke).toHaveBeenNthCalledWith(1, 'test_source_connection', { code: 'qbitai' })
+  expect(invoke).toHaveBeenNthCalledWith(2, 'test_source_connection', { code: 'qbitai' })
+})
 
 it('keeps menus and navigation responsive while translation is pending', async () => {
   const native = vi.mocked(invoke)

@@ -73,17 +73,120 @@ Translation starts only when requested. It sends the selected title or page text
 
 ## Make the workspace yours
 
-- **Sources — Settings → Sources:** enable, edit, and reorder sources; add RSS, JSON, or HTML sources; import or export individual sources or the full list. **Restore defaults** keeps custom sources and historical topics.
+- **Sources — Settings → Sources:** enable, edit, and reorder sources; add RSS, JSON, or HTML sources; import or export individual sources or the full list. Use **Test connectivity** to check every source, including disabled ones, or the connection icon to test one source. Each test chooses a route afresh using the saved proxy address, without adding topics or changing source settings; a dialog summarizes the results when the batch finishes. **Restore defaults** keeps custom sources and historical topics.
 - **Proxy — Settings → Network proxy:** select a saved proxy or edit its address. Check a source’s latest status and error details when collection fails.
 - **Storage — Settings → Local data:** inspect storage health, clean up records, and create or restore local backups. The app keeps the three most recent backups. Restoring replaces current local data and retains downloaded files.
 - **Hidden topics — Settings → Local data → Hidden topics:** search and restore a single topic or all hidden topics.
 
 Public sources can change or restrict access. When MIT Technology Review’s official feed is unavailable, the app can recover headlines and original links through Bing’s public news index; results may be delayed or incomplete. Some websites require login, human verification, or viewing certain content in their own app.
 
+## Source connection Q&A
+
+When a source fails, use the questions and steps below to troubleshoot. Each single-source or batch test chooses a route afresh for that test, without requiring you to edit the saved Network route first:
+
+1. **Save the actual proxy address.** In **Settings → Network proxy**, save the HTTP proxy address used by your running proxy app, with the correct port. Ports 7897 and 1082 are only presets; the app does not scan or switch ports automatically.
+2. **Start a test.** Use the connectivity icon on a source row, or **Test connectivity** for all sources. Check the actual **Direct or Proxy** route; a successful switch shows **Automatically switched**. Every test chooses afresh without changing source settings, topics, or collection history.
+3. **Save the collection setting if needed.** A passing test does not change how collection connects. To let collection switch automatically for QbitAI or another source, click its pencil **Edit** icon, set **Network route** to **Automatic**, and save. Collection still follows an explicit **Direct** or **Use proxy** choice.
+
+**When does Automatic switch?** Testing starts with the source’s default route. Only a connection problem such as TLS (secure connection) failure, reset, timeout, or DNS (website address lookup) failure, together with a saved proxy address, triggers one attempt over the other route. HTTP 403 (access refused), 429 (too many requests), and invalid data do not trigger switching. Tests and collection in **Automatic** mode keep sources on this computer on Direct; collection explicitly set to **Use proxy** follows that choice. If it still fails, compare in a browser, try later, or share the source name, error, and test result.
+
+<details>
+<summary>View all 11 questions and next steps</summary>
+
+### A source will not connect. What should I try first?
+
+Every single-source or batch connectivity test chooses a route afresh for that test; you do not need to edit the saved Network route first. Testing does not add topics, change source settings, or replace collection history. The last collection and current test are different requests, so errors can differ.
+
+1. In Settings → Network proxy, save the HTTP proxy address actually used by your proxy app. Check that the app is running and the port matches. Without a saved proxy address, only Direct can be tested.
+2. Use the test icon beside the affected source, or Test connectivity for all sources. Check the actual Direct or Proxy route and any Automatically switched message.
+3. If testing passes but collection fails, check the source’s saved Network route. To let collection switch automatically too, edit the source, select Automatic, and save. Share the source name, error, and test result if it still fails.
+
+### What should I do about “TLS failed” or “connection reset”?
+
+TLS means a secure connection; a failure means it could not finish. A reset means the connection was cut off. The network, website, or proxy may be involved, so this message alone cannot identify the cause. Each test starts with the source’s default route; with a saved proxy address, a connection problem can trigger one attempt over the other route.
+
+1. In Settings → Network proxy, save the HTTP proxy address actually used by your running proxy app. Its address and port must match. Ports 7897 and 1082 are only presets; the app does not search for an available port.
+2. Use the connectivity icon beside QbitAI or the affected source directly; you do not need to select Automatic first. Check the actual Direct or Proxy route. A successful switch shows Automatically switched.
+3. Testing does not change collection settings. To enable automatic switching during collection too, use the source’s pencil Edit icon, set Network route to Automatic, and save. Keep certificate verification enabled. If it still fails, compare in a browser, check the system clock, or share the error rather than bypassing security warnings.
+
+### What should I do about a timeout or DNS failure?
+
+A timeout means the result took too long. A DNS failure means the website’s network address could not be found. The network may be temporarily unavailable or the address may be misspelled; the source is not necessarily gone.
+
+1. Check that other websites open, then test only this source once.
+2. Check the saved proxy address and that its app is running. Each test chooses a route automatically; a timeout or DNS connection problem can trigger one attempt over the other route. The result shows the route actually used for this test without changing collection settings.
+3. Open the same address in a browser and check for spelling mistakes. If a later retry still fails, share the source, error, and test result.
+
+### Why does testing pass while collection fails? How do I make collection choose automatically too?
+
+Every connectivity test chooses a route afresh regardless of the saved Network route, and leaves that setting unchanged. Collection still follows the saved choice: Direct skips the proxy, Use proxy uses the saved proxy, and only Automatic can switch after a connection problem. A passing test does not change how collection connects. Testing and collection in Automatic mode keep sources on this computer on Direct. A refused connection alone does not prove a proxy fault.
+
+1. Save the address of your running HTTP proxy in Settings → Network proxy, then start a single-source or batch test. Ports 7897 and 1082 are only presets and must match the running app. The app does not scan ports or switch presets automatically.
+2. To enable Automatic during collection for QbitAI or another source, go to Settings → Sources, click its pencil Edit icon, set Network route to Automatic, and save. Explicit Direct or Use proxy settings are still followed during collection.
+3. Each test shows the actual Direct or Proxy route. A successful switch shows Automatically switched. Compare that result with the saved collection setting before collecting. If you stop the proxy app, sources explicitly set to Use proxy need the proxy restarted or their Network route changed.
+
+### What should I do about HTTP 401/403 or human verification?
+
+HTTP 401/403 means the website refused access. It may require login, permission, or verification. Automatic does not switch routes for these access restrictions or verification pages; switching proxies is not a guaranteed fix either. Signing in through a browser does not guarantee access to the collection address.
+
+1. Open the source in a browser and check its login or verification prompt. Do not repeatedly test a verification page.
+2. If the test uses Proxy, check that the proxy is running and its settings are saved. Repeatedly switching nodes is not a reliable solution.
+3. Prefer public RSS/API addresses: the website’s subscription or data addresses. For sources such as Xiaohongshu, use Login and collect. Report persistent errors from other built-in sources.
+
+### Why does HTTP 429 appear after repeated tests?
+
+HTTP 429 means too many requests: the website has temporarily limited access. Repeated tests or collection add requests, and other people on the same network may share the limit. Automatic does not switch routes because of a 429 response.
+
+1. Stop repeated tests and collection. Follow any wait time given by the website.
+2. After waiting, test only this source once, without collecting it at the same time.
+3. If the limit remains, check the website in a browser, try later, or share the source and error. Do not keep switching proxies to retry.
+
+### Does HTTP 5xx mean the app is broken?
+
+HTTP 5xx means the website or an intermediate service temporarily failed. The website, a service along the connection, or a proxy may be involved; the number alone does not show that the app is at fault. Automatic does not switch routes for these website error responses.
+
+1. Wait a little, then test only this source once instead of refreshing repeatedly.
+2. For Proxy results, check that the proxy app is running and its correct address and port have been saved.
+3. Open the same address in a browser. If it still fails, try later and share the source, full error, and Direct or Proxy label.
+
+### What should I do about HTTP 404/410 or an invalid address?
+
+This usually means the collection address could not be found. It may have moved, stopped working, or redirected to an unavailable page. Some websites also use these responses to restrict access.
+
+1. Retest this source once. If you edited it, check that the changes are saved and the address is spelled correctly.
+2. For custom sources, check the publisher’s website for its current RSS/API subscription or data address. Save the new address before retesting; do not replace it with the homepage.
+3. You do not need to edit built-in source rules. Report the source name and error if it remains unavailable.
+
+### The website opens, but the app says the data is invalid or no valid topics were found. What now?
+
+A reachable website does not always return a topic list. It may have changed, or it may return a login or verification page, leaving the app unable to read its headlines. Automatic does not switch routes for invalid data.
+
+1. Retest only this source and check the website in a browser for login or verification prompts.
+2. Built-in sources do not require you to understand technical settings. Share the source and full error if it keeps failing so support can be updated.
+3. For custom sources only, check the RSS/API subscription or data address first. If familiar with advanced settings, then check the content type and headline/link reading rules; save before retesting.
+
+### Why are there no new topics when the result says “Connected, no items”?
+
+The request finished, but it found no topics to display. The source may have no content at the moment, or the website may have changed. This result does not promise new data on the next collection.
+
+1. Check the source in a browser for recent content, then test it once.
+2. For a custom source, check its collection address first. Leave advanced reading rules unchanged if you are unsure what to edit.
+3. Try later. If the website has content but the result stays empty, share the source name and test result.
+
+### Why does the browser work while collection fails? Must I sign into Xiaohongshu again?
+
+Browsers can use login sessions, load full pages, and complete verification; ordinary source collection does not use those browser sessions. Xiaohongshu needs Login and collect. “Browser check required” does not mean you have been logged out.
+
+1. Open the source in the built-in browser and check for login or human verification.
+2. For Xiaohongshu, use Login and collect beside the source. If its homepage still shows you as signed in, this test message alone is not a reason to sign in again.
+3. For other sources, check the publisher’s public RSS/API subscription or data address. Share the source and error if the webpage works but collection still fails.
+
+</details>
+
 ## Data and privacy
 
 - **Your workspace stays on your device.** Topics, queue, settings, source configurations, and saved browsing/download records are stored locally. No Topic Desk account is required, and the app does not upload your queue.
-- **Network access follows your actions.** Collection contacts enabled sources, reading contacts the article’s website, and optional translation contacts your configured model service.
+- **Network access follows your actions.** Collection contacts enabled sources, connection tests contact the selected source, reading contacts the article’s website, and optional translation contacts your configured model service.
 - **API keys are encrypted locally** and are never exposed to pages.
 - **Login cookies can survive tab closures and app restarts.** They are encrypted locally and excluded from backups. Cookies without a website expiry are remembered for up to 30 days; website expiry or revocation may require signing in again. Clearing cookies removes remembered logins from all reading tabs.
 - **Other website storage is temporary.** On macOS, reading tabs share a temporary session during each app run. Other website data is discarded when you clear site data or exit. The app does not save or autofill passwords.

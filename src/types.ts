@@ -72,6 +72,18 @@ export interface SourceConfiguration {
 
 export type SaveSourceConfiguration = Omit<SourceConfiguration, 'builtIn'>
 
+/** A read-only fetch-and-parse diagnostic, separate from collection history. */
+export interface SourceConnectionTestResult {
+  readonly code: string
+  readonly status: 'success' | 'empty' | 'failed' | 'manual'
+  readonly elapsedMs: number
+  readonly itemCount: number
+  readonly error: string | null
+  readonly route: 'direct' | 'proxy' | null
+  /** Automatic routing tried this route before switching to the reported route. */
+  readonly fallbackFrom?: 'direct' | 'proxy' | null
+}
+
 /** SQLite 查询参数；所有可选字段均在 Rust 边界再次校验。 */
 export interface TopicQuery {
   readonly source?: string

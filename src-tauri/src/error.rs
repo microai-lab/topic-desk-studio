@@ -19,6 +19,9 @@ pub enum AppError {
     Initialization(String),
     #[error("采集失败：{0}")]
     Collection(String),
+    /// Typed transport failures alone may trigger an automatic alternate route.
+    #[error("采集失败：{0}")]
+    CollectionConnection(String),
     #[error("翻译失败：{0}")]
     Translation(String),
 }

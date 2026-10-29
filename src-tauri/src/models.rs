@@ -121,6 +121,38 @@ pub struct SourceConfiguration {
     pub parser_config: CustomParserConfig,
 }
 
+/// A connectivity check verifies usable parsed data rather than HTTP reachability alone.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceConnectionTestStatus {
+    Success,
+    Empty,
+    Failed,
+    Manual,
+}
+
+/// Actual network route after resolving the saved source and application proxy settings.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceConnectionTestRoute {
+    Direct,
+    Proxy,
+}
+
+/// Transient diagnostics never change topics, collection runs, or source health history.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceConnectionTestResult {
+    pub code: String,
+    pub status: SourceConnectionTestStatus,
+    pub elapsed_ms: u64,
+    pub item_count: usize,
+    pub error: Option<String>,
+    pub route: Option<SourceConnectionTestRoute>,
+    /// The first route when Auto tried its alternate; null for a single route.
+    pub fallback_from: Option<SourceConnectionTestRoute>,
+}
+
 /// Validated source update crossing the WebView boundary.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

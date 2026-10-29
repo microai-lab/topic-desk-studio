@@ -139,6 +139,7 @@ export interface Messages {
   sourceParser: string
   sourceProxyMode: string
   sourceAuto: string
+  sourceAutoHelp: string
   sourceDirect: string
   sourceProxy: string
   sourceItemsPath: string
@@ -305,6 +306,7 @@ const zh: Messages = {
   sourceParser: '解析方式',
   sourceProxyMode: '网络方式',
   sourceAuto: '自动判断',
+  sourceAutoHelp: '连接失败时，自动尝试直连或已保存的代理。',
   sourceDirect: '直连',
   sourceProxy: '使用代理',
   sourceItemsPath: '列表路径',
@@ -470,6 +472,7 @@ const en: Messages = {
   sourceParser: 'Parser',
   sourceProxyMode: 'Network route',
   sourceAuto: 'Automatic',
+  sourceAutoHelp: 'If the connection fails, try Direct or the saved proxy automatically.',
   sourceDirect: 'Direct',
   sourceProxy: 'Use proxy',
   sourceItemsPath: 'Items path',

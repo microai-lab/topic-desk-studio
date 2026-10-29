@@ -4,6 +4,7 @@ mod browser_control;
 mod browser_profile;
 mod browser_sessions;
 mod catalog;
+mod collection_routing;
 mod collector;
 mod commands;
 mod credential_cipher;
@@ -32,7 +33,7 @@ use commands::{
     reorder_source_configurations, restore_all_hidden_topics, restore_default_sources,
     restore_hidden_topic, restore_latest_backup, save_model_settings, save_network_settings,
     save_source_configuration, save_ui_preferences, set_platform_enabled, set_topic_queued,
-    translate_topic, AppState,
+    test_source_connection, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -131,6 +132,7 @@ pub fn run() {
             open_data_directory,
             set_platform_enabled,
             list_source_configurations,
+            test_source_connection,
             reorder_source_configurations,
             save_source_configuration,
             delete_source,
