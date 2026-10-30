@@ -10,8 +10,8 @@ export async function listTopics(query: TopicQuery): Promise<TopicPage> {
 }
 
 /** 触发受控采集；采集器尚未就绪时后端会返回明确状态。 */
-export async function refreshTopics(): Promise<RefreshResult> {
-  return invoke<RefreshResult>('refresh_topics')
+export async function refreshTopics(source = 'all'): Promise<RefreshResult> {
+  return invoke<RefreshResult>('refresh_topics', { source: source === 'all' ? null : source })
 }
 
 /** Import only normalized public cards from an ephemeral logged-in Xiaohongshu tab. */

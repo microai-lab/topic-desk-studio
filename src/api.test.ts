@@ -1,7 +1,7 @@
 /** Browser lifecycle requests must remain ordered even when a native call fails. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
-import { browserControl, browserRequest, testSourceConnection } from './api'
+import { browserControl, browserRequest, refreshTopics, testSourceConnection } from './api'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
@@ -88,4 +88,23 @@ it('reveals a completed download by record id without accepting a frontend path'
   expect(native).toHaveBeenCalledWith('browser_control', {
     request: { kind: 'revealDownload', id: 42 },
   })
+})
+
+
+it('collects all enabled sources for All and only the selected source otherwise', async () => {
+  vi.mocked(invoke).mockResolvedValue({})
+  await refreshTopics()
+  await refreshTopics('all')
+  await refreshTopics('techcrunch')
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ['refresh_topics', { source: null }],
+    ['refresh_topics', { source: null }],
+    ['refresh_topics', { source: 'techcrunch' }],
+  ])
+})
+
+it('preserves collection errors without falling back to all sources', async () => {
+  vi.mocked(invoke).mockRejectedValueOnce(new Error('disabled source'))
+  await expect(refreshTopics('missing')).rejects.toThrow('disabled source')
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('refresh_topics', { source: 'missing' })
 })

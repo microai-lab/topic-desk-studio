@@ -683,6 +683,7 @@ pub async fn translate_topic(
 pub async fn refresh_topics(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    source: Option<String>,
 ) -> Result<RefreshResult, String> {
     if state
         .refreshing
@@ -703,7 +704,7 @@ pub async fn refresh_topics(
     let refreshing = Arc::clone(&state.refreshing);
     let event_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let result = collector::collect_all(&database_path, "manual");
+        let result = collector::collect_selected(&database_path, "manual", source.as_deref());
         refreshing.store(false, Ordering::Release);
         match &result {
             Ok(stats) => emit_collection_status(

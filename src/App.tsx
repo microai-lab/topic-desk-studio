@@ -681,7 +681,7 @@ export function App() {
   const collect = async (): Promise<void> => {
     setRefreshing(true); setError(undefined); setNotice(undefined)
     try {
-      const result = await refreshTopics()
+      const result = await refreshTopics(source)
       setNotice({ scope: 'workspace', text: result.message })
       if (result.insertedTopicIds.length > 0) { setView('new'); setPageIndex(0) }
       // Manual refresh is a network collection followed by an immediate local query.

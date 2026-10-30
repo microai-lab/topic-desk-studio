@@ -259,9 +259,50 @@ fn connection_test_result(
 
 /// Collect every enabled source with bounded concurrency and serial transactional persistence.
 pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionStats> {
+    collect_selected(database_path, trigger, None)
+}
+
+/// Resolve selection before creating runs so invalid, disabled and browser-only
+/// sources cannot accidentally fall back to collecting every source.
+fn selected_platforms(
+    platforms: Vec<PlatformSource>,
+    source: Option<&str>,
+) -> AppResult<Vec<PlatformSource>> {
+    let Some(code) = source else {
+        return Ok(platforms);
+    };
+    if code.is_empty()
+        || code.len() > 48
+        || !code
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return Err(AppError::InvalidInput("数据来源无效".into()));
+    }
+    if code == "xiaohongshu" {
+        return Err(AppError::InvalidInput(
+            "小红书请在数据来源设置中使用“登录采集”".into(),
+        ));
+    }
+    let selected: Vec<_> = platforms
+        .into_iter()
+        .filter(|platform| platform.code == code)
+        .collect();
+    if selected.is_empty() {
+        return Err(AppError::InvalidInput("数据来源不存在或已停用".into()));
+    }
+    Ok(selected)
+}
+
+/// Manual collection follows the source filter; startup/timers keep collecting all enabled sources.
+pub fn collect_selected(
+    database_path: &Path,
+    trigger: &str,
+    source: Option<&str>,
+) -> AppResult<CollectionStats> {
     let connection = open_database(database_path)?;
     let repository = TopicRepository::new(&connection);
-    let platforms = repository.enabled_platforms()?;
+    let platforms = selected_platforms(repository.enabled_platforms()?, source)?;
     if platforms.is_empty() {
         return Err(AppError::Collection("没有启用的数据来源".into()));
     }
@@ -1577,6 +1618,38 @@ mod tests {
             parser_config: Default::default(),
             proxy_mode: SourceProxyMode::Auto,
         }
+    }
+
+    #[test]
+    fn source_selection_collects_all_or_exactly_one_without_broadening_invalid_requests() {
+        let all = selected_platforms(
+            vec![diagnostic_platform("qbitai"), diagnostic_platform("github")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(all.len(), 2);
+        let one = selected_platforms(all, Some("github")).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].code, "github");
+        for code in [
+            "",
+            "all",
+            "unknown",
+            "QBITAI",
+            " qbitai",
+            "../qbitai",
+            "xiaohongshu",
+        ] {
+            assert!(
+                selected_platforms(vec![diagnostic_platform("qbitai")], Some(code)).is_err(),
+                "{code}"
+            );
+        }
+        assert!(selected_platforms(vec![], Some("qbitai")).is_err());
+        assert!(
+            selected_platforms(vec![diagnostic_platform("qbitai")], Some(&"x".repeat(49))).is_err()
+        );
+        assert!(selected_platforms(vec![], None).unwrap().is_empty());
     }
 
     fn fixture_feed(code: &str) -> ParsedFeed {
