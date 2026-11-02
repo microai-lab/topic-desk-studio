@@ -1175,19 +1175,22 @@ mod tests {
             vec![Some("缓存译文".into()), None]
         );
         assert_eq!(
-            cached_page_translations(&[text.clone()], "en", &settings).unwrap(),
+            cached_page_translations(std::slice::from_ref(&text), "en", &settings).unwrap(),
             vec![None]
         );
         let mut other_model = settings.clone();
         other_model.model = "different-model".into();
         assert_eq!(
-            cached_page_translations(&[text.clone()], "zh-CN", &other_model).unwrap(),
+            cached_page_translations(std::slice::from_ref(&text), "zh-CN", &other_model).unwrap(),
             vec![None]
         );
-        assert!(cached_page_translations(&[text.clone()], "unsupported", &settings).is_err());
+        assert!(
+            cached_page_translations(std::slice::from_ref(&text), "unsupported", &settings)
+                .is_err()
+        );
         assert_eq!(
             tauri::async_runtime::block_on(translate_page_batch_texts_with_progress(
-                &[text.clone()],
+                std::slice::from_ref(&text),
                 "zh-CN",
                 &settings,
                 None,

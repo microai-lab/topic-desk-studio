@@ -126,12 +126,23 @@ static SOURCE_CONNECTION_TESTS: AtomicUsize = AtomicUsize::new(0);
 struct SourceConnectionTestPermit<'a>(&'a AtomicUsize);
 impl<'a> SourceConnectionTestPermit<'a> {
     fn acquire(counter: &'a AtomicUsize) -> Result<Self, String> {
-        counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < 3).then_some(active + 1)
-            })
-            .map(|_| Self(counter))
-            .map_err(|_| "最多同时测试 3 个数据源，请稍后重试".into())
+        // compare_exchange_weak is supported by both older desktop toolchains
+        // and newer stable Rust where fetch_update has been deprecated.
+        let mut active = counter.load(Ordering::Acquire);
+        loop {
+            if active >= 3 {
+                return Err("最多同时测试 3 个数据源，请稍后重试".into());
+            }
+            match counter.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self(counter)),
+                Err(observed) => active = observed,
+            }
+        }
     }
 }
 impl Drop for SourceConnectionTestPermit<'_> {
@@ -870,6 +881,40 @@ mod tests {
         });
         assert!(unwind.is_err());
         assert_eq!(counter.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn diagnostic_permits_never_exceed_three_under_contention() {
+        let counter = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        // Every successful contender holds its permit until all attempts finish.
+        std::thread::scope(|workers| {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let counter = &counter;
+                let barrier = &barrier;
+                handles.push(workers.spawn(move || {
+                    barrier.wait();
+                    let permit = SourceConnectionTestPermit::acquire(counter);
+                    barrier.wait();
+                    let acquired = permit.is_ok();
+                    assert!(counter.load(Ordering::Acquire) <= 3);
+                    drop(permit);
+                    acquired
+                }));
+            }
+            assert_eq!(
+                handles
+                    .into_iter()
+                    .map(|handle| usize::from(handle.join().unwrap()))
+                    .sum::<usize>(),
+                3
+            );
+        });
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        let invalid_counter = AtomicUsize::new(usize::MAX);
+        assert!(SourceConnectionTestPermit::acquire(&invalid_counter).is_err());
+        assert_eq!(invalid_counter.load(Ordering::Acquire), usize::MAX);
     }
 
     #[test]
