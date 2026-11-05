@@ -579,6 +579,26 @@ impl BrowserBounds {
     }
 }
 
+/// Avoid resetting a live browser's frame on focus/scroll notifications when
+/// geometry is unchanged. Read the actual native frame (rather than caching the
+/// last request), so recovery still repairs a frame moved by the window manager.
+/// Native engines round fractional logical coordinates; one physical pixel of
+/// tolerance prevents those rounding differences from causing repeated writes.
+fn reader_frame_changed(current: tauri::Rect, requested: tauri::Rect, scale: f64) -> bool {
+    let current_position = current.position.to_logical::<f64>(scale);
+    let requested_position = requested.position.to_logical::<f64>(scale);
+    let current_size = current.size.to_logical::<f64>(scale);
+    let requested_size = requested.size.to_logical::<f64>(scale);
+    [
+        current_position.x - requested_position.x,
+        current_position.y - requested_position.y,
+        current_size.width - requested_size.width,
+        current_size.height - requested_size.height,
+    ]
+    .iter()
+    .any(|difference| difference.abs() * scale > 1.0)
+}
+
 fn is_article_url(url: &url::Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
@@ -852,11 +872,14 @@ pub fn browser_request(
                     .is_some_and(|tab| tab.status.loading)
             };
             if let Some(view) = app.get_webview(&label) {
-                view.set_bounds(tauri::Rect {
+                let requested = tauri::Rect {
                     position: position.into(),
                     size: size.into(),
-                })
-                .map_err(|e| e.to_string())?;
+                };
+                if reader_frame_changed(view.bounds().map_err(|e| e.to_string())?, requested, scale)
+                {
+                    view.set_bounds(requested).map_err(|e| e.to_string())?;
+                }
                 if !target_loading {
                     view.show().map_err(|e| e.to_string())?;
                 }
@@ -1223,6 +1246,37 @@ pub fn save_screenshot(view: &tauri::Webview, path: &std::path::Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reader_frame_sync_is_idempotent_but_repairs_native_drift() {
+        let frame = |x, y, width, height| tauri::Rect {
+            position: LogicalPosition::new(x, y).into(),
+            size: LogicalSize::new(width, height).into(),
+        };
+        let requested = frame(500.25, 80.25, 1000.25, 700.25);
+        for scale in [1.0, 1.5, 2.0] {
+            assert!(!reader_frame_changed(requested, requested, scale));
+            // macOS truncates logical sizes; DPI conversion can also round origins.
+            assert!(!reader_frame_changed(
+                frame(500.0, 80.0, 1000.0, 700.0),
+                requested,
+                scale,
+            ));
+            let physical = tauri::Rect {
+                position: requested.position.to_physical::<i32>(scale).into(),
+                size: requested.size.to_physical::<u32>(scale).into(),
+            };
+            assert!(!reader_frame_changed(physical, requested, scale));
+            for changed in [
+                frame(1600.0, 80.25, 1000.25, 700.25),
+                frame(500.25, 100.0, 1000.25, 700.25),
+                frame(500.25, 80.25, 3000.0, 700.25),
+                frame(500.25, 80.25, 1000.25, 900.0),
+            ] {
+                assert!(reader_frame_changed(changed, requested, scale));
+            }
+        }
+    }
 
     #[test]
     fn tab_close_stops_media_before_saving_and_always_disposes_after_snapshot_failure() {
