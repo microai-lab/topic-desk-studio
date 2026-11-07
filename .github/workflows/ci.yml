@@ -48,7 +48,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-22.04, macos-14, windows-latest]
+        # macOS 14 images retired on 2026-11-02.
+        platform: [ubuntu-22.04, macos-15, windows-latest]
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Check out source

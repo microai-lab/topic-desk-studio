@@ -17,7 +17,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14
+          # macOS 14 images retired on 2026-11-02; macos-15 is Apple Silicon.
+          - platform: macos-15
             args: '--target aarch64-apple-darwin'
             rust_target: 'aarch64-apple-darwin'
           # macOS 13 runners were retired; this label preserves the Intel package.
