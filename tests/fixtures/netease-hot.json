@@ -1,0 +1,8 @@
+{"code":0,"data":{"items":[
+  {"type":"doc","contentId":"LB06PJCA05345ARG","title":"网易新闻热点测试标题","ptime":"2026-11-07 12:00:00","hotValue":12345},
+  {"type":"video","contentId":"VZA13BHV7","title":"网易新闻视频测试标题","hotValue":456},
+  {"type":"doc","contentId":"LB06PJCA05345ARG","title":"重复热点应保留首次标题","hotValue":999},
+  {"type":"doc","contentId":"../../evil","title":"不可信标识不能构造链接"},
+  {"type":"doc","contentId":"LB4M0CLP053469LG","title":"<script>alert(1)</script>"},
+  {"type":"unknown","contentId":"LB4M0CLP053469LG","title":"未知内容类型应跳过"}
+]}}

@@ -33,6 +33,7 @@ pub fn default_region(code: &str) -> &'static str {
             | "xueqiu"
             | "toutiao"
             | "thepaper"
+            | "netease"
             | "zhihu"
             | "jin10"
             | "cls"
@@ -119,6 +120,7 @@ pub const PLATFORM_CATALOG: &[PlatformDefinition] = &[
     PlatformDefinition { code: "xueqiu", display_name: "雪球", home_url: "https://xueqiu.com/", endpoint_url: "https://xueqiu.com/today" },
     PlatformDefinition { code: "toutiao", display_name: "今日头条", home_url: "https://www.toutiao.com/", endpoint_url: "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc" },
     PlatformDefinition { code: "thepaper", display_name: "澎湃新闻", home_url: "https://www.thepaper.cn/", endpoint_url: "https://www.thepaper.cn/" },
+    PlatformDefinition { code: "netease", display_name: "网易新闻", home_url: "https://news.163.com/", endpoint_url: "https://gw.m.163.com/nc-main/api/v1/hqc/no-repeat-hot-list" },
     PlatformDefinition { code: "zhihu", display_name: "知乎", home_url: "https://www.zhihu.com/", endpoint_url: "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=100&desktop=true" },
     PlatformDefinition { code: "binance-square-zh", display_name: "币安广场中文", home_url: "https://www.binance.com/zh-CN/square", endpoint_url: "https://www.binance.com/bapi/composite/v3/friendly/pgc/content/article/list?pageIndex=1&pageSize=20&type=1" },
     PlatformDefinition { code: "binance-square-global", display_name: "币安广场全球", home_url: "https://www.binance.com/en/square", endpoint_url: "https://www.binance.com/bapi/composite/v3/friendly/pgc/content/article/list?pageIndex=1&pageSize=20&type=1" },
@@ -178,6 +180,22 @@ pub fn google_trends_topic_url(code: &str, title: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn netease_uses_the_public_official_hot_news_endpoint() {
+        let platform = PLATFORM_CATALOG
+            .iter()
+            .find(|platform| platform.code == "netease")
+            .unwrap();
+        assert_eq!(platform.display_name, "网易新闻");
+        assert_eq!(default_region(platform.code), "domestic");
+        assert_eq!(default_category(platform.code), "general");
+        assert_eq!(default_proxy_mode(platform.code), "direct");
+        assert_eq!(
+            platform.endpoint_url,
+            "https://gw.m.163.com/nc-main/api/v1/hqc/no-repeat-hot-list"
+        );
+    }
 
     #[test]
     fn catalog_codes_and_urls_are_valid_and_unique() {

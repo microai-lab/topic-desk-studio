@@ -55,6 +55,15 @@ export interface CustomParserConfig {
   readonly linkSelector?: string
 }
 
+/** Explicit categories selected in the destructive local-data confirmation dialog. */
+export interface ClearDataSelection {
+  readonly collectedData: boolean
+  readonly browserHistory: boolean
+  readonly downloadRecords: boolean
+  readonly websiteLogins: boolean
+  readonly localBackups: boolean
+}
+
 /** Editable source definition stored in SQLite. */
 export interface SourceConfiguration {
   readonly code: string

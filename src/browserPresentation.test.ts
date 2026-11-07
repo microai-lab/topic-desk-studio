@@ -1,7 +1,14 @@
 /** Regression tests for browser chrome state, trusted domains and bounded controls. */
 
 import { describe, expect, it, vi } from 'vitest'
-import { browserTabClosePlan, clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+import { browserTabClosePlan, clampDeviceDimension, detachBrowserTopicIds, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+
+it('detaches cleared topic IDs while preserving open pages and leaving original tabs untouched', () => {
+  const tabs = [{ id: 'a', topicId: 1, url: 'https://example.org/old', title: 'Old' }, { id: 'b', url: 'https://example.org/other', title: 'Other' }]
+  expect(detachBrowserTopicIds(tabs)).toEqual([{ id: 'a', url: 'https://example.org/old', title: 'Old' }, tabs[1]])
+  expect(tabs[0]?.topicId).toBe(1)
+  expect(detachBrowserTopicIds([])).toEqual([])
+})
 
 describe('runBrowserTabClose', () => {
   it('removes each tab only after native close finishes and ignores duplicate ids', async () => {

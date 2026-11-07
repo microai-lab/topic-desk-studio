@@ -1,11 +1,38 @@
 /** Browser lifecycle requests must remain ordered even when a native call fails. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
-import { browserControl, browserRequest, refreshTopics, testSourceConnection } from './api'
+import { browserControl, browserRequest, clearLocalData, disableSourceRegion, refreshTopics, testSourceConnection } from './api'
+import { EMPTY_CLEAR_SELECTION } from './storagePresentation'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 afterEach(() => vi.mocked(invoke).mockReset())
+
+it.each(['websiteLogins', 'localBackups'] as const)('forwards an isolated %s selection without enabling other categories', async key => {
+  const selection = { ...EMPTY_CLEAR_SELECTION, [key]: true }
+  vi.mocked(invoke).mockResolvedValueOnce({ message: 'cleared', backupName: null })
+  await clearLocalData(selection)
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('clear_local_data', { confirmed: true, selection })
+})
+
+it('sends explicit confirmation when clearing collected data and propagates failures', async () => {
+  const selection = { collectedData: false, browserHistory: true, downloadRecords: false, websiteLogins: false, localBackups: false }
+  const result = { message: 'cleared', backupName: null }
+  vi.mocked(invoke).mockResolvedValueOnce(result)
+  await expect(clearLocalData(selection)).resolves.toEqual(result)
+  expect(invoke).toHaveBeenCalledExactlyOnceWith('clear_local_data', { confirmed: true, selection })
+  vi.mocked(invoke).mockRejectedValueOnce(new Error('collection active'))
+  await expect(clearLocalData(selection)).rejects.toThrow('collection active')
+})
+
+it('disables the requested region through one native transaction and exposes failures', async () => {
+  vi.mocked(invoke).mockResolvedValueOnce([])
+  await expect(disableSourceRegion('domestic')).resolves.toEqual([])
+  expect(invoke).toHaveBeenLastCalledWith('disable_source_region', { region: 'domestic' })
+  vi.mocked(invoke).mockRejectedValueOnce(new Error('fixture rollback'))
+  await expect(disableSourceRegion('international')).rejects.toThrow('fixture rollback')
+  expect(invoke).toHaveBeenLastCalledWith('disable_source_region', { region: 'international' })
+})
 
 it('tests only a saved source by code through the native boundary', async () => {
   const result = { code: 'techcrunch', status: 'success', elapsedMs: 520, itemCount: 12, error: null, route: 'proxy' }

@@ -2,6 +2,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Independent destructive-data choices; omitted/unknown fields are rejected at IPC.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearDataSelection {
+    pub collected_data: bool,
+    pub browser_history: bool,
+    pub download_records: bool,
+    pub website_logins: bool,
+    pub local_backups: bool,
+}
+
+impl ClearDataSelection {
+    /// An empty selection must never reach the deletion transaction.
+    pub fn validate(self) -> crate::error::AppResult<()> {
+        if !self.collected_data
+            && !self.browser_history
+            && !self.download_records
+            && !self.website_logins
+            && !self.local_backups
+        {
+            return Err(crate::error::AppError::InvalidInput(
+                "请至少选择一类要清除的数据".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Region groups sources by organization origin rather than feed language.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

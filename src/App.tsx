@@ -13,8 +13,16 @@ import {
 } from './api'
 import { ProxyAddressField } from './ProxyAddressField'
 import { DEFAULT_PROXY_URL } from './networkPresentation'
+import { createSourceSettingsReader, enabledSources, sourceDraftForSave } from './sourceSettingsState'
+import { SourceSettingsGroups } from './SourceSettingsGroups'
+import { SourceSettingsToolbar } from './SourceSettingsToolbar'
+import { disableSourceRegion } from './api'
+import { clearLocalData } from './api'
+import type { ClearDataSelection } from './types'
+import { EMPTY_CLEAR_SELECTION, hasClearSelection } from './storagePresentation'
+import { SourceRegionActions } from './SourceRegionActions'
 import { BrowserPane } from './BrowserPane'
-import { browserTabClosePlan } from './browserPresentation'
+import { browserTabClosePlan, detachBrowserTopicIds } from './browserPresentation'
 import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
 import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, sidebarNavigationPlan } from './layout'
@@ -346,6 +354,11 @@ export function App() {
   const [hiddenTopicsPage, setHiddenTopicsPage] = useState(0)
   const [restoringHidden, setRestoringHidden]    = useState<number | 'all'>()
   const [sourceConfigs,   setSourceConfigs]      = useState<SourceConfiguration[]>([])
+  const sourceSettingsReader = useRef(createSourceSettingsReader())
+  const sourceTogglesInFlight = useRef(new Set<string>())
+  const [togglingSources, setTogglingSources] = useState<string[]>([])
+  const sourceBulkInFlight = useRef(false)
+  const [disablingRegion, setDisablingRegion] = useState<SourceRegion>()
   const [sourceConnectionTests, setSourceConnectionTests] = useState<Record<string, SourceConnectionTestState>>({})
   const [sourceNetworkRevision, setSourceNetworkRevision] = useState(0)
   const sourceTestsInFlight = useRef(new Set<string>())
@@ -364,7 +377,7 @@ export function App() {
   const selectedModelProvider = MODEL_PROVIDER_PRESETS.find((provider) => provider.id === modelProvider)
   const modelUsesPreset = selectedModelProvider?.models.includes(modelName) === true
   const enabledSourceConfigs = useMemo(
-    () => sourceConfigs.filter((sourceConfig) => sourceConfig.enabled),
+    () => enabledSources(sourceConfigs),
     [sourceConfigs],
   )
   /** Cascading filters expose only combinations backed by an enabled source. */
@@ -393,6 +406,19 @@ export function App() {
     browserTabsRef.current = next
     setBrowserTabs(next)
   }, [])
+
+  // Native login clearing destroys every reading view and its temporary context.
+  // Reset chrome even when a different selected cleanup later reports failure.
+  useEffect(() => {
+    const unlisten = listen('browser-context-reset', () => {
+      replaceBrowserTabs([])
+      topicTabIdsRef.current.clear()
+      setActiveBrowserTabId('')
+      setBrowserOpen(false)
+      setReaderExpanded(false)
+    })
+    return () => { void unlisten.then(stop => stop()).catch(() => {}) }
+  }, [replaceBrowserTabs])
 
   const activateBrowserTab = useCallback((id: string): void => {
     activeBrowserTabIdRef.current = id
@@ -624,9 +650,13 @@ export function App() {
   }, [load])
 
   useEffect(() => {
-    void listSourceConfigurations().then(setSourceConfigs)
+    // Reopening settings reads SQLite again; stale responses cannot undo a toggle.
+    if (sourceTogglesInFlight.current.size > 0 || sourceBulkInFlight.current) return
+    const reader = sourceSettingsReader.current
+    void reader.refresh(listSourceConfigurations, setSourceConfigs)
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-  }, [])
+    return () => reader.invalidate()
+  }, [view, settingsTab])
 
   useEffect(() => {
     if (region === 'all' || enabledSourceConfigs.some((sourceConfig) => sourceConfig.region === region)) return
@@ -709,6 +739,10 @@ export function App() {
   }
 
   const changePlatform = async (code: string, enabled: boolean): Promise<void> => {
+    if (sourceTogglesInFlight.current.has(code) || savingSource || sourceBulkInFlight.current) return
+    sourceTogglesInFlight.current.add(code)
+    setTogglingSources([...sourceTogglesInFlight.current])
+    sourceSettingsReader.current.invalidate()
     setError(undefined)
     try {
       await setPlatformEnabled(code, enabled)
@@ -716,6 +750,30 @@ export function App() {
       await load()
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally {
+      sourceSettingsReader.current.invalidate()
+      sourceTogglesInFlight.current.delete(code)
+      setTogglingSources([...sourceTogglesInFlight.current])
+    }
+  }
+
+  /** Publish switches only after the regional transaction succeeds; failures retain the saved list. */
+  const disableRegion = async (region: SourceRegion): Promise<void> => {
+    if (sourceBulkInFlight.current || sourceTogglesInFlight.current.size > 0 || savingSource || reorderingSources) return
+    sourceBulkInFlight.current = true
+    setDisablingRegion(region)
+    sourceSettingsReader.current.invalidate()
+    setError(undefined)
+    try {
+      setSourceConfigs(await disableSourceRegion(region))
+      await load(true)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      sourceSettingsReader.current.invalidate()
+      sourceBulkInFlight.current = false
+      setDisablingRegion(undefined)
+    }
   }
 
   /** Each diagnostic reevaluates routes using saved source/proxy details, independently of collection mode.
@@ -780,10 +838,11 @@ export function App() {
   }
 
   const saveSource = async (): Promise<void> => {
-    if (!sourceDraft) return
+    if (!sourceDraft || sourceTogglesInFlight.current.size > 0 || sourceBulkInFlight.current) return
+    sourceSettingsReader.current.invalidate()
     setSavingSource(true); setError(undefined)
     try {
-      setSourceConfigs(await saveSourceConfiguration(sourceDraft))
+      setSourceConfigs(await saveSourceConfiguration(sourceDraftForSave(sourceDraft, sourceConfigs)))
       setSourceDraft(undefined)
       setEditingSourceCode(undefined)
       setNotice({ scope: 'sources', text: m.sourceSaved })
@@ -976,19 +1035,46 @@ export function App() {
     } finally { setSavingNetwork(false) }
   }
 
-  const runStorageAction = async (action: StorageAction): Promise<void> => {
+  const runStorageAction = async (action: StorageAction, selection: ClearDataSelection = EMPTY_CLEAR_SELECTION): Promise<void> => {
+    if (action === 'clear' && !hasClearSelection(selection)) return
     setStorageAction(action); setError(undefined); setNotice(undefined)
     try {
       const result = action === 'backup'
         ? await backupStorage()
         : action === 'restore'
           ? await restoreLatestBackup()
-          : await optimizeStorage()
+          : action === 'clear'
+            ? await clearLocalData(selection)
+            : await optimizeStorage()
       setNotice({ scope: 'storage', text: result.message })
+      if (action === 'clear' && selection.collectedData) {
+        topicTabIdsRef.current.clear()
+        replaceBrowserTabs(detachBrowserTopicIds(browserTabsRef.current))
+      }
       setStorageStatus(await getStorageStatus())
-      if (action === 'restore') await load(true)
+      if (action === 'restore' || (action === 'clear' && selection.collectedData)) {
+        setPageIndex(0)
+        setHiddenTopics(await listHiddenTopics())
+        setHiddenTopicsPage(0)
+        setHiddenTopicsSearch('')
+        await load(true)
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
+      // Cross-store cleanup reports completed and failed groups separately.
+      // Refresh counts after a partial failure instead of showing stale records.
+      if (action === 'clear') {
+        if (selection.collectedData) {
+          topicTabIdsRef.current.clear()
+          replaceBrowserTabs(detachBrowserTopicIds(browserTabsRef.current))
+          setPageIndex(0)
+        }
+        await Promise.allSettled([
+          getStorageStatus().then(setStorageStatus),
+          listHiddenTopics().then(setHiddenTopics),
+          load(true),
+        ])
+      }
     } finally { setStorageAction(null) }
   }
 
@@ -1072,7 +1158,7 @@ export function App() {
       {sourceDraft.parserType === 'html' ? <div className="source-parser-grid">
         {([['itemSelector', m.sourceItemSelector, 'article'], ['titleSelector', m.sourceTitleSelector, 'h2'], ['linkSelector', m.sourceLinkSelector, 'a']] as const).map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input value={sourceDraft.parserConfig[key] ?? ''} placeholder={placeholder} onChange={(e) => updateParserConfig(key, e.target.value)} /></label>)}
       </div> : null}
-      <div className="source-editor-actions"><button type="button" onClick={() => { setSourceDraft(undefined); setEditingSourceCode(undefined) }}>{m.sourceCancel}</button><button className="primary-button" type="button" disabled={savingSource} onClick={() => void saveSource()}>{savingSource ? m.btnSaving : m.btnSave}</button></div>
+      <div className="source-editor-actions"><button type="button" onClick={() => { setSourceDraft(undefined); setEditingSourceCode(undefined) }}>{m.sourceCancel}</button><button className="primary-button" type="button" disabled={savingSource || disablingRegion !== undefined || togglingSources.length > 0} onClick={() => void saveSource()}>{savingSource ? m.btnSaving : m.btnSave}</button></div>
     </div>
   )
 
@@ -1105,10 +1191,10 @@ export function App() {
         {sourceTestSummary !== undefined && pendingStorageAction === null ? <SourceConnectionSummaryDialog progress={sourceTestSummary} locale={locale} onClose={() => setSourceTestSummary(undefined)} /> : null}
         {pendingStorageAction !== null ? <StorageConfirmation action={pendingStorageAction} m={m}
           onCancel={() => setPendingStorageAction(null)}
-          onConfirm={() => {
+          onConfirm={(selection) => {
             setPendingStorageAction(null)
             if (pendingStorageAction === 'restoreSources') void restoreSources()
-            else void runStorageAction(pendingStorageAction)
+            else void runStorageAction(pendingStorageAction, selection)
           }} /> : null}
         <header className="settings-fs-header">
           <button className="back-button" type="button" onClick={() => switchView(prevView)}>
@@ -1194,23 +1280,24 @@ export function App() {
 
             {settingsTab === 'sources' && (
               <div className="settings-page source-settings" aria-live="polite">
-                <header className="settings-page-header source-settings-header">
-                  <div><h2>{m.tabSources}</h2><p>{m.settingsSourcesDesc}</p></div>
-                  <div className="source-batch-actions">
+                <SourceSettingsToolbar m={m} regional={<>
+                    <SourceRegionActions sources={sourceConfigs} locale={locale}
+                      busy={disablingRegion !== undefined || savingSource || reorderingSources || togglingSources.length > 0}
+                      onDisable={(region) => void disableRegion(region)} />
+                    </>} primary={<>
                     <SourceConnectionBatchTestButton locale={locale} running={sourceTestBatch?.running === true}
                       disabled={Object.values(sourceConnectionTests).some((state) => state.phase === 'testing' || state.phase === 'queued') || sourceConfigs.length === 0}
                       completed={sourceTestBatch?.progress.completed ?? 0} total={sourceTestBatch?.progress.total ?? 0}
                       onTest={() => void testAllSourceConfigurations()} />
-                    <button type="button" onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
-                    <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
-                    <button type="button" onClick={() => setPendingStorageAction('restoreSources')}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
                     <button className="primary-button source-add-button" type="button" onClick={() => editSource()}><Plus aria-hidden="true" />{m.sourceAdd}</button>
-                  </div>
-                </header>
+                    </>} maintenance={<>
+                    <button type="button" disabled={disablingRegion !== undefined} onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
+                    <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
+                    <button type="button" disabled={disablingRegion !== undefined} onClick={() => setPendingStorageAction('restoreSources')}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
+                    </>} />
 
                 {sourceDraft !== undefined && editingSourceCode === undefined ? renderSourceEditor() : null}
-                <div className="source-list" aria-busy={reorderingSources}>
-                  {sourceConfigs.map((sourceConfig) => {
+                <SourceSettingsGroups sources={sourceConfigs} busy={reorderingSources} m={m} renderSource={(sourceConfig) => {
                     const status = page?.statuses.find((item) => item.code === sourceConfig.code)
                     const sourceTest = sourceConnectionTests[sourceConfig.code]
                     const connectionState = sourceTest?.phase === 'testing' ? sourceTest
@@ -1233,7 +1320,7 @@ export function App() {
                           aria-hidden="true"
                           title={m.sourceDragToReorder}
                         ><GripVertical aria-hidden="true" /></span>
-                        <span className={`health-dot ${sourceHealthTone(connectionState, status?.status)}`} />
+                        <span className="source-avatar" aria-hidden="true">{Array.from(sourceConfig.displayName)[0]?.toUpperCase()}<span className={`health-dot ${sourceHealthTone(connectionState, status?.status)}`} /></span>
                         <div className="source-row-info">
                           <span className="source-row-name">{sourceConfig.displayName}<small className="source-kind">{sourceConfig.builtIn ? m.sourceBuiltIn : `${m.sourceCustom} · ${sourceConfig.parserType.toUpperCase()}`}</small></span>
                           <span className="source-row-meta" title={status?.error ?? undefined}>{sourceConfig.region === 'domestic' ? m.regionDomestic : m.regionIntl} · {status?.error ?? (status?.lastRunAt == null ? m.notCollected : m.topicCount(status.topicCount))}</span>
@@ -1241,16 +1328,17 @@ export function App() {
                         </div>
                         <SourceConnectionTestButton state={connectionState} locale={locale} disabled={sourceTestBatch?.running === true} onTest={() => void testSourceConfiguration(sourceConfig)} />
                         {sourceConfig.code === 'xiaohongshu' ? <button className="source-action" type="button" onClick={openXiaohongshuSession}>{m.xhsLoginCollect}</button> : null}
-                        <button className="source-icon-action" type="button" title={m.sourceImport} onClick={() => void importSources(sourceConfig.code)}><Download aria-hidden="true" /></button>
-                        <button className="source-icon-action" type="button" title={m.sourceExport} onClick={() => void exportSources(sourceConfig.code)}><Upload aria-hidden="true" /></button>
-                        <button className={`source-icon-action${editingSourceCode === sourceConfig.code ? ' active' : ''}`} type="button" title={m.sourceEdit} aria-expanded={editingSourceCode === sourceConfig.code} onClick={() => editSource(sourceConfig)}><Pencil aria-hidden="true" /></button>
-                        <button className="source-icon-action danger" type="button" title={m.sourceDeleteConfirm(sourceConfig.displayName)} onClick={() => void removeSource(sourceConfig)}><Trash2 aria-hidden="true" /></button>
-                        <label className="switch"><input type="checkbox" checked={sourceConfig.enabled} onChange={(e) => void changePlatform(sourceConfig.code, e.target.checked)} /><span /></label>
+                        <div className="source-row-tools">
+                        <button className="source-icon-action" type="button" aria-label={m.sourceImport} disabled={disablingRegion !== undefined} title={m.sourceImport} onClick={() => void importSources(sourceConfig.code)}><Download aria-hidden="true" /></button>
+                        <button className="source-icon-action" type="button" aria-label={m.sourceExport} title={m.sourceExport} onClick={() => void exportSources(sourceConfig.code)}><Upload aria-hidden="true" /></button>
+                        <button className={`source-icon-action${editingSourceCode === sourceConfig.code ? ' active' : ''}`} type="button" aria-label={m.sourceEdit} title={m.sourceEdit} aria-expanded={editingSourceCode === sourceConfig.code} onClick={() => editSource(sourceConfig)}><Pencil aria-hidden="true" /></button>
+                        <button className="source-icon-action danger" type="button" aria-label={m.sourceDeleteConfirm(sourceConfig.displayName)} disabled={disablingRegion !== undefined} title={m.sourceDeleteConfirm(sourceConfig.displayName)} onClick={() => void removeSource(sourceConfig)}><Trash2 aria-hidden="true" /></button>
+                        </div>
+                        <label className="switch"><input type="checkbox" aria-label={m.sourceToggleLabel(sourceConfig.displayName)} checked={sourceConfig.enabled} disabled={savingSource || disablingRegion !== undefined || togglingSources.includes(sourceConfig.code)} onChange={(e) => void changePlatform(sourceConfig.code, e.target.checked)} /><span /></label>
                       </div>
                       {editingSourceCode === sourceConfig.code ? renderSourceEditor() : null}
                     </div>
-                  })}
-                </div>
+                  }} />
               </div>
             )}
 
@@ -1280,6 +1368,7 @@ export function App() {
                     <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
                     <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
                     <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
+                    <button className="storage-restore" type="button" disabled={storageAction !== null || refreshing} onClick={() => setPendingStorageAction('clear')}><Trash2 aria-hidden="true" />{storageAction === 'clear' ? m.storageWorking : m.storageClear}</button>
                     <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => setPendingStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
                   </div>
                   {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}

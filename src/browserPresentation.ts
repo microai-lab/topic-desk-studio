@@ -2,6 +2,11 @@
 
 import type { BrowserAction, BrowserSettings } from './api'
 
+/** Cleared SQLite topic IDs can be reused; open pages must no longer claim those IDs. */
+export function detachBrowserTopicIds<T extends { readonly topicId?: number }>(tabs: readonly T[]): Omit<T, 'topicId'>[] {
+  return tabs.map(({ topicId: _topicId, ...tab }) => tab)
+}
+
 /** Apply an already-successful native close. Only removing the final tab restores
  * the topic list; stale close notifications cannot hide a newly opened reader. */
 export function browserTabClosePlan<T extends { readonly id: string }>(tabs: readonly T[], activeId: string, closedId: string) {

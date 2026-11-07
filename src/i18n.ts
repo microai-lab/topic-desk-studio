@@ -103,6 +103,19 @@ export interface Messages {
   storageNoBackup: string
   storageOpenFolder: string
   storageOptimize: string
+  storageClear: string
+  storageClearConfirm: string
+  storageClearSelect: string
+  storageClearSelected: string
+  storageClearCollected: string
+  storageClearHistory: string
+  storageClearDownloads: string
+  storageClearLogins: string
+  storageClearBackups: string
+  storageClearCollectedHint: string
+  storageClearDownloadsHint: string
+  storageClearLoginsHint: string
+  storageClearBackupsHint: string
   storageBackup: string
   storageRestore: string
   storageWorking: string
@@ -129,6 +142,15 @@ export interface Messages {
   xhsLoginCollect: string
   xhsCollectPage: string
   sourceAdd: string
+  sourceBulkActions: string
+  sourceMoreActions: string
+  sourceEnabledGroup: string
+  sourceNoEnabled: string
+  sourceToggleLabel: (name: string) => string
+  sourceDisabledGroup: string
+  sourceDisabledGroupHelp: string
+  sourceDisableDomestic: string
+  sourceDisableInternational: string
   sourceEdit: string
   sourceCustom: string
   sourceBuiltIn: string
@@ -271,6 +293,19 @@ const zh: Messages = {
   storageNoBackup: '尚未创建',
   storageOpenFolder: '打开数据目录',
   storageOptimize: '立即整理',
+  storageClear: '清除本地数据',
+  storageClearConfirm: '仅清除所选数据，此操作无法撤销。',
+  storageClearSelect: '选择清除范围',
+  storageClearSelected: '确认清除',
+  storageClearCollected: '采集数据',
+  storageClearHistory: '浏览历史',
+  storageClearDownloads: '下载记录',
+  storageClearLogins: '网站登录数据',
+  storageClearBackups: '本地备份',
+  storageClearCollectedHint: '全部选题（含隐藏）、趋势、采集记录与待创作；后续可重新采集',
+  storageClearDownloadsHint: '保留已下载的文件',
+  storageClearLoginsHint: '退出所有网站并关闭阅读标签页',
+  storageClearBackupsHint: '手动备份及升级前快照，删除后无法恢复',
   storageBackup: '创建备份',
   storageRestore: '恢复最近备份',
   storageWorking: '处理中…',
@@ -296,6 +331,15 @@ const zh: Messages = {
   xhsLoginCollect: '登录采集',
   xhsCollectPage: '采集当前页',
   sourceAdd: '添加数据源',
+  sourceBulkActions: '批量管理',
+  sourceMoreActions: '更多操作',
+  sourceEnabledGroup: '已启用来源',
+  sourceNoEnabled: '暂无启用来源。展开下方已关闭的来源，或添加一个新来源。',
+  sourceToggleLabel: (name) => `启用 ${name}`,
+  sourceDisabledGroup: '已关闭的数据源',
+  sourceDisabledGroupHelp: '展开后可重新启用；已启用来源会自动展示在上方。',
+  sourceDisableDomestic: '一键关闭国内数据源',
+  sourceDisableInternational: '一键关闭国外数据源',
   sourceEdit: '编辑数据源',
   sourceCustom: '自定义',
   sourceBuiltIn: '默认',
@@ -437,6 +481,19 @@ const en: Messages = {
   storageNoBackup: 'Not created yet',
   storageOpenFolder: 'Open data folder',
   storageOptimize: 'Optimize now',
+  storageClear: 'Clear local data',
+  storageClearConfirm: 'Permanently delete selected data. This cannot be undone.',
+  storageClearSelect: 'Select data to clear',
+  storageClearSelected: 'Confirm clear',
+  storageClearCollected: 'Collected data',
+  storageClearHistory: 'Browsing history',
+  storageClearDownloads: 'Download records',
+  storageClearLogins: 'Website sign-ins',
+  storageClearBackups: 'Local backups',
+  storageClearCollectedHint: 'All topics (including hidden), trends, collection records and creation queue; future runs can collect new data',
+  storageClearDownloadsHint: 'Downloaded files are kept',
+  storageClearLoginsHint: 'Log out of all websites and close reading tabs',
+  storageClearBackupsHint: 'Manual backups and pre-upgrade snapshots; recovery will no longer be available',
   storageBackup: 'Create backup',
   storageRestore: 'Restore latest',
   storageWorking: 'Working…',
@@ -462,6 +519,15 @@ const en: Messages = {
   xhsLoginCollect: 'Login & collect',
   xhsCollectPage: 'Collect page',
   sourceAdd: 'Add source',
+  sourceBulkActions: 'Bulk actions',
+  sourceMoreActions: 'More actions',
+  sourceEnabledGroup: 'Enabled sources',
+  sourceNoEnabled: 'No enabled sources. Expand disabled sources below or add a new source.',
+  sourceToggleLabel: (name) => `Enable ${name}`,
+  sourceDisabledGroup: 'Disabled sources',
+  sourceDisabledGroupHelp: 'Expand to enable a source again. Enabled sources automatically appear above.',
+  sourceDisableDomestic: 'Disable domestic sources',
+  sourceDisableInternational: 'Disable international sources',
   sourceEdit: 'Edit source',
   sourceCustom: 'Custom',
   sourceBuiltIn: 'Default',

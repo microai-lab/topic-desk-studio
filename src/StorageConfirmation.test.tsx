@@ -7,7 +7,7 @@ import type { StorageAction } from './StorageConfirmation'
 
 describe('storage confirmation', () => {
   for (const locale of ['zh', 'en'] as const) {
-    for (const action of ['optimize', 'backup', 'restore', 'restoreSources'] as const) {
+    for (const action of ['optimize', 'backup', 'restore', 'restoreSources', 'clear'] as const) {
       it(`requires a choice before ${action} in ${locale}`, () => {
         const execute = vi.fn()
         const m = messages[locale]
@@ -38,5 +38,29 @@ describe('storage confirmation', () => {
     }
     expect(storageConfirmation('backup', messages.zh).description).toContain('3')
     expect(storageConfirmation('restore', messages.zh).description).toContain('覆盖')
+  })
+
+  it('keeps the destructive warning brief and moves category consequences to their own hints', () => {
+    expect(storageConfirmation('clear', messages.zh).dangerous).toBe(true)
+    expect(messages.zh.storageClearConfirm).toContain('无法撤销')
+    expect(messages.en.storageClearConfirm).toContain('cannot be undone')
+    expect(messages.zh.storageClearConfirm).not.toContain('退出所有网站')
+    expect(messages.zh.storageClearLoginsHint).toContain('退出所有网站')
+    expect(messages.zh.storageClearBackupsHint).toContain('无法恢复')
+    expect(messages.en.storageClearCollectedHint).toContain('future runs')
+  })
+
+  it('starts with five unchecked categories and confirmation disabled in both languages', () => {
+    for (const locale of ['zh', 'en'] as const) {
+      const m = messages[locale]
+      const html = renderToStaticMarkup(<StorageConfirmation action="clear" m={m} onCancel={() => {}} onConfirm={() => {}} />)
+      expect(html.match(/type="checkbox"/g)).toHaveLength(5)
+      expect(html).not.toContain('checked=""')
+      expect(html).toContain('disabled=""')
+      for (const label of [m.storageClearSelect, m.storageClearCollected, m.storageClearHistory, m.storageClearDownloads, m.storageClearLogins, m.storageClearBackups, m.storageClearSelected]) expect(html).toContain(label)
+      for (const hint of [m.storageClearCollectedHint, m.storageClearDownloadsHint, m.storageClearLoginsHint, m.storageClearBackupsHint]) expect(html).toContain(hint)
+      expect(html.match(/class="storage-clear-option"/g)).toHaveLength(5)
+      expect(html).toContain('websiteLogins-hint')
+    }
   })
 })

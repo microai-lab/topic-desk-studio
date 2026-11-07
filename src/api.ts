@@ -2,6 +2,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import type { Locale } from './i18n'
+import type { SourceRegion } from './types'
+import type { ClearDataSelection } from './types'
 import type { HiddenTopicView, ModelSettings, NetworkSettings, RefreshResult, SaveModelSettings, SaveNetworkSettings, SaveSourceConfiguration, SaveUiPreferences, SourceConfiguration, SourceConnectionTestResult, StorageOperationResult, StorageStatus, TopicPage, TopicQuery, TranslationResult, UiPreferences } from './types'
 
 /** 查询本地 SQLite 中的当前话题。 */
@@ -32,6 +34,11 @@ export async function hideTopic(topicId: number): Promise<void> {
 /** Persist one source switch while keeping historical rows available locally. */
 export async function setPlatformEnabled(code: string, enabled: boolean): Promise<void> {
   await invoke('set_platform_enabled', { code, enabled })
+}
+
+/** Disable only the selected region through the transactional native boundary. */
+export async function disableSourceRegion(region: SourceRegion): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('disable_source_region', { region })
 }
 
 /** Load source definitions for the native-only collection engine. */
@@ -157,6 +164,11 @@ export async function restoreLatestBackup(): Promise<StorageOperationResult> {
 /** Apply retention rules, optimize indexes and checkpoint WAL files. */
 export async function optimizeStorage(): Promise<StorageOperationResult> {
   return invoke<StorageOperationResult>('optimize_storage')
+}
+
+/** Called only after the storage dialog accepts permanent collection-data removal. */
+export async function clearLocalData(selection: ClearDataSelection): Promise<StorageOperationResult> {
+  return invoke<StorageOperationResult>('clear_local_data', { confirmed: true, selection })
 }
 
 /** Reveal the private application data folder in the system file manager. */

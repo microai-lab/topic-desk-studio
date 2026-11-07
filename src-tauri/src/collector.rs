@@ -262,6 +262,19 @@ pub fn collect_all(database_path: &Path, trigger: &str) -> AppResult<CollectionS
     collect_selected(database_path, trigger, None)
 }
 
+/// Resolve the live source switch immediately before HTTP, without holding a
+/// transaction across the request. An in-flight toggle is checked again at commit.
+fn fetch_if_enabled(
+    repository: &TopicRepository<'_>,
+    platform: &PlatformSource,
+    fetch: impl FnOnce() -> AppResult<ParsedFeed>,
+) -> AppResult<Option<ParsedFeed>> {
+    if !repository.platform_is_enabled(platform.id)? {
+        return Ok(None);
+    }
+    fetch().map(Some)
+}
+
 /// Resolve selection before creating runs so invalid, disabled and browser-only
 /// sources cannot accidentally fall back to collecting every source.
 fn selected_platforms(
@@ -304,7 +317,7 @@ pub fn collect_selected(
     let repository = TopicRepository::new(&connection);
     let platforms = selected_platforms(repository.enabled_platforms()?, source)?;
     if platforms.is_empty() {
-        return Err(AppError::Collection("没有启用的数据来源".into()));
+        return Ok(CollectionStats::default());
     }
 
     let mut jobs = VecDeque::new();
@@ -319,7 +332,7 @@ pub fn collect_selected(
     }
     let job_count = jobs.len();
     if job_count == 0 {
-        return Err(AppError::Collection("没有可自动采集的数据来源".into()));
+        return Ok(CollectionStats::default());
     }
 
     let network_settings = repository.network_settings()?;
@@ -332,12 +345,31 @@ pub fn collect_selected(
             let jobs = Arc::clone(&jobs);
             let sender = sender.clone();
             let proxy_url = network_settings.proxy_url.as_deref();
-            scope.spawn(move || loop {
-                let job = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
-                let Some((platform, run_id)) = job else { break };
-                let result = fetch_routed_source(&platform, proxy_url, false).result;
-                if sender.send((platform, run_id, result)).is_err() {
-                    break;
+            scope.spawn(move || {
+                // Read-only worker connections observe live toggles without rerunning
+                // migrations/catalog initialization or sharing SQLite handles across threads.
+                let live = rusqlite::Connection::open_with_flags(
+                    database_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .and_then(|connection| {
+                    connection.busy_timeout(Duration::from_secs(5))?;
+                    Ok(connection)
+                });
+                loop {
+                    let job = jobs.lock().ok().and_then(|mut queue| queue.pop_front());
+                    let Some((platform, run_id)) = job else { break };
+                    let result = match &live {
+                        Ok(connection) => {
+                            fetch_if_enabled(&TopicRepository::new(connection), &platform, || {
+                                fetch_routed_source(&platform, proxy_url, false).result
+                            })
+                        }
+                        Err(error) => Err(AppError::Collection(error.to_string())),
+                    };
+                    if sender.send((platform, run_id, result)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -346,7 +378,12 @@ pub fn collect_selected(
         let mut totals = CollectionStats::default();
         for (platform, run_id, result) in receiver {
             match result {
-                Ok(feed) => match repository.commit_feed(&platform, run_id, &feed) {
+                Ok(None) => {
+                    if let Err(error) = repository.skip_run(run_id) {
+                        let _ = repository.fail_run(run_id, &error.to_string());
+                    }
+                }
+                Ok(Some(feed)) => match repository.commit_feed(&platform, run_id, &feed) {
                     Ok(stats) => {
                         totals.inserted += stats.inserted;
                         totals.updated += stats.updated;
@@ -846,6 +883,9 @@ fn parse_mit_news_index(bytes: &[u8]) -> AppResult<ParsedFeed> {
 
 /// Parse public JSON APIs whose schemas are stable enough for deterministic extraction.
 fn parse_json(code: &str, payload: &Value, endpoint: &str) -> AppResult<ParsedFeed> {
+    if code == "netease" {
+        return parse_netease_hot(payload);
+    }
     let items: Vec<&Value> = if Url::parse(endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
@@ -1155,6 +1195,59 @@ fn json_topic(code: &str, item: &Value, endpoint: &str, rank: usize) -> Option<C
         }
     };
     make_topic(code, rank, stable_id, title, url, published, heat, endpoint)
+}
+
+/// Parse the public endpoint used by NetEase's mobile hot-news page. Build links
+/// from validated stable IDs instead of trusting arbitrary URLs in remote data.
+fn parse_netease_hot(payload: &Value) -> AppResult<ParsedFeed> {
+    if payload.get("code").and_then(Value::as_i64) != Some(0) {
+        return Err(AppError::Collection("网易新闻热榜返回异常状态".into()));
+    }
+    let items = payload
+        .pointer("/data/items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::Collection("网易新闻热榜列表格式无效".into()))?;
+    let fetched_count = items.len().min(ITEMS_PER_PLATFORM) as u32;
+    let mut topics = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, item) in items.iter().take(ITEMS_PER_PLATFORM).enumerate() {
+        let Some(id) = item.get("contentId").and_then(Value::as_str) else {
+            continue;
+        };
+        let (path, length) = match item.get("type").and_then(Value::as_str) {
+            Some("doc") => ("a", 16),
+            Some("video") => ("v", 9),
+            _ => continue,
+        };
+        if id.len() != length
+            || !id
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        {
+            continue;
+        }
+        if seen.contains(id) {
+            continue;
+        }
+        if let Some(topic) = make_topic(
+            "netease",
+            index + 1,
+            Some(id.into()),
+            item.get("title").and_then(Value::as_str).map(str::to_owned),
+            Some(format!("https://c.m.163.com/news/{path}/{id}.html")),
+            text(item.get("ptime")),
+            number(item.get("hotValue")).filter(|value| value.is_finite() && *value >= 0.0),
+            "https://c.m.163.com/",
+        ) {
+            seen.insert(id.to_owned());
+            topics.push(topic);
+        }
+    }
+    Ok(ParsedFeed {
+        invalid_count: fetched_count.saturating_sub(topics.len() as u32),
+        fetched_count,
+        topics,
+    })
 }
 
 /// Extract article-like links from sources without a public structured endpoint.
@@ -1606,6 +1699,151 @@ fn collection_error(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn netease_hot_fixture_validates_ids_types_titles_and_deduplicates() {
+        let payload: Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/netease-hot.json"))
+                .unwrap();
+        let feed = parse_json(
+            "netease",
+            &payload,
+            "https://gw.m.163.com/nc-main/api/v1/hqc/no-repeat-hot-list",
+        )
+        .unwrap();
+        assert_eq!(
+            (feed.fetched_count, feed.invalid_count, feed.topics.len()),
+            (6, 4, 2)
+        );
+        assert_eq!(
+            feed.topics[0].stable_id.as_deref(),
+            Some("LB06PJCA05345ARG")
+        );
+        assert_eq!(feed.topics[0].title, "网易新闻热点测试标题");
+        assert_eq!(feed.topics[0].heat, Some(12345.0));
+        assert_eq!(
+            feed.topics[0].published_time.as_deref(),
+            Some("2026-11-07 12:00:00")
+        );
+        assert_eq!(
+            feed.topics[0].url,
+            "https://c.m.163.com/news/a/LB06PJCA05345ARG.html"
+        );
+        assert_eq!(
+            feed.topics[1].url,
+            "https://c.m.163.com/news/v/VZA13BHV7.html"
+        );
+        assert_eq!((feed.topics[0].rank, feed.topics[1].rank), (1, 2));
+        let original = crate::identity::identify_topic(&feed.topics[0]).unwrap();
+        let mut changed = feed.topics[0].clone();
+        changed.rank = 99;
+        changed.heat = Some(1.0);
+        assert_eq!(
+            original.hash,
+            crate::identity::identify_topic(&changed).unwrap().hash
+        );
+    }
+
+    #[test]
+    fn netease_hot_handles_empty_malformed_failed_and_oversized_responses() {
+        assert!(parse_netease_hot(&serde_json::json!({"code":403,"data":{"items":[]}})).is_err());
+        assert!(parse_netease_hot(&serde_json::json!({"code":0,"data":{"items":{}}})).is_err());
+        assert!(
+            parse_netease_hot(&serde_json::json!({"code":0,"data":{"items":[]}}))
+                .unwrap()
+                .topics
+                .is_empty()
+        );
+        let items: Vec<_> = (0..60).map(|i| serde_json::json!({"type":"doc","contentId":format!("{i:016}"),"title":"test headline","hotValue":-1})).collect();
+        let feed =
+            parse_netease_hot(&serde_json::json!({"code":0,"data":{"items":items}})).unwrap();
+        assert_eq!(feed.topics.len(), ITEMS_PER_PLATFORM);
+        assert_eq!(feed.fetched_count as usize, ITEMS_PER_PLATFORM);
+        assert!(feed.topics.iter().all(|topic| topic.heat.is_none()));
+    }
+    #[test]
+    fn automatic_collection_with_all_sources_disabled_is_a_noop() {
+        let directory = std::env::temp_dir().join(format!(
+            "topic-desk-disabled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let path = directory.join("topics.sqlite");
+        let connection = super::open_database(&path).unwrap();
+        connection
+            .execute("UPDATE platform SET enabled=0", [])
+            .unwrap();
+        for trigger in ["startup", "timer"] {
+            let stats = super::collect_all(&path, trigger).unwrap();
+            assert_eq!((stats.inserted, stats.updated), (0, 0));
+        }
+        assert!(super::collect_selected(&path, "manual", Some("qbitai")).is_err());
+        for table in ["collection_run", "topic", "topic_observation"] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn queued_collection_rechecks_switch_before_network() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001_initial.sql"))
+            .unwrap();
+        connection.execute("INSERT INTO platform(code, display_name, home_url, feed_url) VALUES('qbitai','Test','https://example.org','https://example.org/feed')", []).unwrap();
+        let repository = crate::repository::TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let feed = || crate::models::ParsedFeed {
+            topics: vec![],
+            fetched_count: 0,
+            invalid_count: 0,
+        };
+        assert!(
+            super::fetch_if_enabled(&repository, &platform, || Ok(feed()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(super::fetch_if_enabled(&repository, &platform, || Err(
+            crate::error::AppError::Collection("fixture failure".into())
+        ))
+        .is_err());
+        repository.set_platform_enabled("qbitai", false).unwrap();
+        assert!(super::fetch_if_enabled(&repository, &platform, || panic!(
+            "disabled sources must not issue HTTP requests"
+        ))
+        .unwrap()
+        .is_none());
+        assert!(repository.enabled_platforms().unwrap().is_empty());
+        repository.set_platform_enabled("qbitai", true).unwrap();
+        assert!(
+            super::fetch_if_enabled(&repository, &platform, || Ok(feed()))
+                .unwrap()
+                .is_some()
+        );
+        connection
+            .execute("UPDATE platform SET deleted=1", [])
+            .unwrap();
+        assert!(super::fetch_if_enabled(&repository, &platform, || panic!(
+            "deleted sources must not issue HTTP requests"
+        ))
+        .unwrap()
+        .is_none());
+        connection.execute("DROP TABLE platform", []).unwrap();
+        assert!(super::fetch_if_enabled(&repository, &platform, || panic!(
+            "failed switch checks must not issue HTTP requests"
+        ))
+        .is_err());
+    }
+
     use super::*;
     use crate::models::CustomParserConfig;
 

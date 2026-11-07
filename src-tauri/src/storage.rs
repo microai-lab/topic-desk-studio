@@ -14,6 +14,101 @@ const BACKUP_LIMIT: usize = 3;
 const TOPIC_DATABASE: &str = "topic-desk.sqlite";
 const BROWSER_DATABASE: &str = "browser.sqlite";
 
+/// Cookie stores and filesystem backups cannot join SQLite's transaction. Run
+/// selected groups independently and explicitly report any partial completion.
+pub(crate) fn clear_selected(
+    selection: crate::models::ClearDataSelection,
+    records: impl FnOnce() -> Result<(), String>,
+    logins: impl FnOnce() -> Result<(), String>,
+    backups: impl FnOnce() -> Result<(), String>,
+) -> Result<StorageOperationResult, String> {
+    selection.validate().map_err(|error| error.to_string())?;
+    let results = [
+        (
+            "所选记录",
+            (selection.collected_data || selection.browser_history || selection.download_records)
+                .then(records),
+        ),
+        ("网站登录数据", selection.website_logins.then(logins)),
+        ("本地备份", selection.local_backups.then(backups)),
+    ];
+    let mut completed = Vec::new();
+    let mut failed = Vec::new();
+    for (name, result) in results {
+        match result {
+            Some(Ok(())) => completed.push(name),
+            Some(Err(error)) => failed.push(format!("{name}：{error}")),
+            None => {}
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "清除未全部完成。已完成：{}；未完成：{}",
+            if completed.is_empty() {
+                "无".into()
+            } else {
+                completed.join("、")
+            },
+            failed.join("；")
+        ));
+    }
+    Ok(StorageOperationResult {
+        message: "所选本地数据已清除".into(),
+        backup_name: None,
+    })
+}
+
+/// Match only backup names produced by this application, including migration
+/// snapshots and their copied keys; unrelated files in the directory are retained.
+fn managed_backup(name: &str, directory: bool) -> bool {
+    let numeric = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if directory {
+        return name.strip_prefix("backup-").is_some_and(numeric);
+    }
+    name.strip_prefix("topic-desk-pre-v")
+        .and_then(|value| value.strip_suffix(".sqlite"))
+        .is_some_and(numeric)
+        || name
+            .strip_prefix("model-credential-pre-v")
+            .and_then(|value| value.strip_suffix(".key"))
+            .is_some_and(numeric)
+}
+
+/// Delete application-owned backups only. Never follow a symlinked backup root
+/// or entries, and never touch live databases, cookie vaults or live master keys.
+pub fn clear_backups(data_directory: &Path) -> AppResult<()> {
+    let root = data_directory.join("backups");
+    let metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::InvalidInput(
+            "备份目录不是普通目录，未执行删除".into(),
+        ));
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if !kind.is_symlink()
+            && (kind.is_dir() || kind.is_file())
+            && managed_backup(&entry.file_name().to_string_lossy(), kind.is_dir())
+        {
+            candidates.push((entry.path(), kind.is_dir()));
+        }
+    }
+    for (path, directory) in candidates {
+        if directory {
+            fs::remove_dir_all(path)?;
+        } else {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Summarize disk use and health without returning any stored content to the WebView.
 pub fn status(
     data_directory: &Path,
@@ -208,10 +303,11 @@ fn backup_directories(data_directory: &Path) -> AppResult<Vec<PathBuf>> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
-            path.is_dir()
+            fs::symlink_metadata(path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
                 && path
                     .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("backup-"))
+                    .is_some_and(|name| managed_backup(&name.to_string_lossy(), true))
         })
         .collect::<Vec<_>>();
     entries.sort();
@@ -234,6 +330,139 @@ fn rotate_backups(data_directory: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_groups_respect_all_selections_and_report_partial_failures() {
+        use std::cell::Cell;
+        for mask in 0..32 {
+            let selected = crate::models::ClearDataSelection {
+                collected_data: mask & 1 != 0,
+                browser_history: mask & 2 != 0,
+                download_records: mask & 4 != 0,
+                website_logins: mask & 8 != 0,
+                local_backups: mask & 16 != 0,
+            };
+            let records = Cell::new(0);
+            let logins = Cell::new(0);
+            let backups = Cell::new(0);
+            let result = clear_selected(
+                selected,
+                || {
+                    records.set(records.get() + 1);
+                    Ok(())
+                },
+                || {
+                    logins.set(logins.get() + 1);
+                    Ok(())
+                },
+                || {
+                    backups.set(backups.get() + 1);
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_ok(), mask != 0);
+            assert_eq!(records.get(), i32::from(mask & 7 != 0));
+            assert_eq!(logins.get(), i32::from(selected.website_logins));
+            assert_eq!(backups.get(), i32::from(selected.local_backups));
+            let encoded = serde_json::to_string(&selected).unwrap();
+            assert!(serde_json::from_str::<crate::models::ClearDataSelection>(&encoded).is_ok());
+        }
+        let finished = Cell::new(false);
+        let error = clear_selected(
+            crate::models::ClearDataSelection {
+                browser_history: true,
+                website_logins: true,
+                local_backups: true,
+                ..Default::default()
+            },
+            || Ok(()),
+            || Err("fixture session failure".into()),
+            || {
+                finished.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(finished.get());
+        assert!(error.contains("已完成：所选记录、本地备份"));
+        assert!(error.contains("未完成：网站登录数据：fixture session failure"));
+    }
+
+    #[test]
+    fn clearing_backups_keeps_live_data_and_unrelated_files() {
+        let root = std::env::temp_dir().join(format!(
+            "topic-desk-clear-backups-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        clear_backups(&root).unwrap();
+        fs::create_dir_all(root.join("backups/backup-123")).unwrap();
+        fs::write(
+            root.join("backups/backup-123/topic-desk.sqlite"),
+            b"snapshot",
+        )
+        .unwrap();
+        for name in ["topic-desk-pre-v5.sqlite", "model-credential-pre-v5.key"] {
+            fs::write(root.join("backups").join(name), b"snapshot").unwrap();
+        }
+        for name in [
+            "topic-desk.sqlite",
+            "browser.sqlite",
+            MASTER_KEY_FILE,
+            "browser-sessions.sqlite",
+        ] {
+            fs::write(root.join(name), b"live fixture").unwrap();
+        }
+        fs::create_dir_all(root.join("backups/backup-notes")).unwrap();
+        fs::write(root.join("backups/notes.txt"), b"unrelated").unwrap();
+        clear_backups(&root).unwrap();
+        clear_backups(&root).unwrap();
+        assert!(!root.join("backups/backup-123").exists());
+        assert!(!root.join("backups/topic-desk-pre-v5.sqlite").exists());
+        assert!(!root.join("backups/model-credential-pre-v5.key").exists());
+        assert!(latest_backup(&root).is_none());
+        for name in [
+            "topic-desk.sqlite",
+            "browser.sqlite",
+            MASTER_KEY_FILE,
+            "browser-sessions.sqlite",
+        ] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), b"live fixture");
+        }
+        assert!(root.join("backups/backup-notes").is_dir());
+        assert_eq!(
+            fs::read(root.join("backups/notes.txt")).unwrap(),
+            b"unrelated"
+        );
+        fs::remove_dir_all(&root).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("backups"), b"not a directory").unwrap();
+        assert!(clear_backups(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clearing_backups_never_follows_a_symlinked_root() {
+        let root = std::env::temp_dir().join(format!(
+            "topic-desk-clear-links-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("outside/backup-123")).unwrap();
+        fs::write(root.join("outside/backup-123/data"), b"keep").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("backups")).unwrap();
+        assert!(clear_backups(&root).is_err());
+        assert_eq!(
+            fs::read(root.join("outside/backup-123/data")).unwrap(),
+            b"keep"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn backup_directory_order_uses_timestamp_names() {

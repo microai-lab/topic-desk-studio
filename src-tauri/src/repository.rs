@@ -11,10 +11,10 @@ use crate::credential_cipher::{EncryptedCredential, ALGORITHM};
 use crate::error::{AppError, AppResult};
 use crate::identity::identify_topic;
 use crate::models::{
-    CollectionStats, HiddenTopicView, ModelSettings, NetworkSettings, ParsedFeed, PlatformSource,
-    PlatformStatusView, SaveSourceConfiguration, SourceConfiguration, SourceParserType,
-    SourceProxyMode, SourceRegion, TopicCategory, TopicPage, TopicQuery, TopicSort, TopicView,
-    UiLocale, UiPreferences, UiTheme,
+    ClearDataSelection, CollectionStats, HiddenTopicView, ModelSettings, NetworkSettings,
+    ParsedFeed, PlatformSource, PlatformStatusView, SaveSourceConfiguration, SourceConfiguration,
+    SourceParserType, SourceProxyMode, SourceRegion, TopicCategory, TopicPage, TopicQuery,
+    TopicSort, TopicView, UiLocale, UiPreferences, UiTheme,
 };
 
 fn parse_region(value: &str) -> AppResult<SourceRegion> {
@@ -450,6 +450,22 @@ impl<'connection> TopicRepository<'connection> {
         Ok(())
     }
 
+    /// Disable a region atomically; existing topics and the other region remain untouched.
+    pub fn disable_source_region(
+        &self,
+        region: SourceRegion,
+    ) -> AppResult<Vec<SourceConfiguration>> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE platform SET enabled = 0, update_time = datetime('now', 'localtime')
+             WHERE deleted = 0 AND region = ? AND enabled != 0",
+            [region_value(region)],
+        )?;
+        let sources = self.source_configurations()?;
+        transaction.commit()?;
+        Ok(sources)
+    }
+
     /// Return editable source definitions without exposing collection history internals.
     pub fn source_configurations(&self) -> AppResult<Vec<SourceConfiguration>> {
         let mut statement = self.connection.prepare(
@@ -847,6 +863,26 @@ impl<'connection> TopicRepository<'connection> {
         })
     }
 
+    /// Recheck the live switch before dispatch; queued jobs may outlive a user's toggle.
+    pub fn platform_is_enabled(&self, platform_id: i64) -> AppResult<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM platform WHERE id = ? AND deleted = 0 AND enabled != 0)",
+            [platform_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Finish a deliberately excluded source without reporting a network failure.
+    pub fn skip_run(&self, run_id: i64) -> AppResult<()> {
+        self.connection.execute(
+            "UPDATE collection_run SET status = 'skipped', end_time = datetime('now', 'localtime'),
+               error_message = NULL, update_time = datetime('now', 'localtime')
+             WHERE id = ? AND status = 'running'",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
     /// Load enabled sources before collection so no database lock is held during HTTP requests.
     pub fn enabled_platforms(&self) -> AppResult<Vec<PlatformSource>> {
         let mut statement = self.connection.prepare(
@@ -928,6 +964,14 @@ impl<'connection> TopicRepository<'connection> {
                 "采集运行不属于平台或状态无效：{}/{run_id}",
                 platform.code
             )));
+        }
+
+        // Check in the same transaction as persistence: closing a source while
+        // HTTP is in flight must not advance its board or append observations.
+        if !self.platform_is_enabled(platform.id)? {
+            self.skip_run(run_id)?;
+            transaction.commit()?;
+            return Ok(CollectionStats::default());
         }
 
         let mut stats = CollectionStats::default();
@@ -1044,6 +1088,66 @@ impl<'connection> TopicRepository<'connection> {
         )?;
         transaction.commit()?;
         Ok(stats)
+    }
+
+    /// Attach the native-owned browser database so statement failures roll back
+    /// topic and browser records together. Both live handles must be locked by
+    /// the desktop command. WAL databases do not guarantee cross-file atomicity
+    /// across power loss; the transaction does guarantee runtime error rollback.
+    pub fn clear_local_data(
+        &self,
+        browser_path: &std::path::Path,
+        selection: ClearDataSelection,
+    ) -> AppResult<()> {
+        selection.validate()?;
+        if !selection.browser_history && !selection.download_records {
+            return self.clear_data_transaction(selection);
+        }
+        self.connection.execute(
+            "ATTACH DATABASE ? AS clearing_browser",
+            [browser_path.to_string_lossy().as_ref()],
+        )?;
+        let result = self.clear_data_transaction(selection);
+        let detached = self
+            .connection
+            .execute_batch("DETACH DATABASE clearing_browser");
+        result?;
+        detached?;
+        Ok(())
+    }
+
+    /// Remove dependents before topics/runs, keeping source switches, settings,
+    /// credentials and browser preferences outside the deletion set.
+    fn clear_data_transaction(&self, selection: ClearDataSelection) -> AppResult<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if selection.collected_data {
+            transaction.execute_batch(
+                "DELETE FROM topic_reading_link;
+             DELETE FROM recent_addition_topic;
+             DELETE FROM recent_addition_batch;
+             DELETE FROM creation_queue;
+             DELETE FROM topic_observation;
+             DELETE FROM topic_observation_hourly;
+             DELETE FROM topic_observation_daily;
+             DELETE FROM topic;
+             UPDATE platform SET last_success_run_id = NULL;
+             DELETE FROM collection_run;",
+            )?;
+        }
+        if selection.browser_history {
+            transaction.execute(
+                "DELETE FROM clearing_browser.records WHERE kind='history'",
+                [],
+            )?;
+        }
+        if selection.download_records {
+            transaction.execute(
+                "DELETE FROM clearing_browser.records WHERE kind='download'",
+                [],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Roll up trends and prune durable operational data with explicit retention windows.
@@ -1387,6 +1491,464 @@ mod tests {
             )
             .expect("platform should insert");
         connection
+    }
+
+    #[test]
+    fn clearing_respects_every_category_combination_and_rejects_empty_selection() {
+        let directory = std::env::temp_dir().join(format!(
+            "topic-desk-clear-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let browser_path = directory.join("browser.sqlite");
+        let browser = Connection::open(&browser_path).unwrap();
+        browser
+            .execute_batch("CREATE TABLE records(kind TEXT)")
+            .unwrap();
+        for mask in 0..8 {
+            browser
+                .execute_batch(
+                    "DELETE FROM records; INSERT INTO records VALUES('history'),('download');",
+                )
+                .unwrap();
+            let connection = fixture();
+            let repository = TopicRepository::new(&connection);
+            let source = repository.enabled_platforms().unwrap().remove(0);
+            repository.create_run(source.id, "manual").unwrap();
+            let selection = ClearDataSelection {
+                collected_data: mask & 1 != 0,
+                browser_history: mask & 2 != 0,
+                download_records: mask & 4 != 0,
+                ..Default::default()
+            };
+            assert_eq!(
+                repository
+                    .clear_local_data(&browser_path, selection)
+                    .is_ok(),
+                mask != 0
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM collection_run", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                i64::from(!selection.collected_data)
+            );
+            for (kind, selected) in [
+                ("history", selection.browser_history),
+                ("download", selection.download_records),
+            ] {
+                assert_eq!(
+                    browser
+                        .query_row("SELECT COUNT(*) FROM records WHERE kind=?", [kind], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap(),
+                    i64::from(!selected)
+                );
+            }
+        }
+        assert!(serde_json::from_str::<ClearDataSelection>(r#"{"collectedData":true}"#).is_err());
+        assert!(serde_json::from_str::<ClearDataSelection>(
+            r#"{"collectedData":true,"browserHistory":false,"downloadRecords":false,"other":true}"#
+        )
+        .is_err());
+        drop(browser);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_local_data_rolls_back_both_databases_and_keeps_login_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "topic-desk-clear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let browser_path = directory.join("browser.sqlite");
+        let browser = Connection::open(&browser_path).unwrap();
+        browser.execute_batch("CREATE TABLE records(id INTEGER PRIMARY KEY, kind TEXT);
+          INSERT INTO records(kind) VALUES('history'),('download');
+          CREATE TABLE preferences(id INTEGER PRIMARY KEY,json TEXT);
+          INSERT INTO preferences VALUES(1,'{}');
+          CREATE TRIGGER reject_clear BEFORE DELETE ON records BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+        for name in ["download.bin", "website-cookie-vault", "backup.sqlite"] {
+            std::fs::write(directory.join(name), b"fixture retained").unwrap();
+        }
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let source = repository.enabled_platforms().unwrap().remove(0);
+        repository.create_run(source.id, "manual").unwrap();
+        assert!(repository
+            .clear_local_data(
+                &browser_path,
+                ClearDataSelection {
+                    collected_data: true,
+                    browser_history: true,
+                    download_records: true,
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM collection_run", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            browser
+                .query_row("SELECT COUNT(*) FROM records", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        browser.execute_batch("DROP TRIGGER reject_clear").unwrap();
+        repository
+            .clear_local_data(
+                &browser_path,
+                ClearDataSelection {
+                    collected_data: true,
+                    browser_history: true,
+                    download_records: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        repository
+            .clear_local_data(
+                &browser_path,
+                ClearDataSelection {
+                    collected_data: true,
+                    browser_history: true,
+                    download_records: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM collection_run", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            browser
+                .query_row("SELECT COUNT(*) FROM records", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            browser
+                .query_row("SELECT json FROM preferences", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "{}"
+        );
+        for name in ["download.bin", "website-cookie-vault", "backup.sqlite"] {
+            assert_eq!(
+                std::fs::read(directory.join(name)).unwrap(),
+                b"fixture retained"
+            );
+        }
+        drop(browser);
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clearing_collected_data_is_atomic_and_preserves_settings() {
+        let connection = fixture();
+        let repository = TopicRepository::new(&connection);
+        let platform = repository.enabled_platforms().unwrap().remove(0);
+        let run = repository.create_run(platform.id, "manual").unwrap();
+        let feed = ParsedFeed {
+            topics: vec![CollectedTopic {
+                platform_code: platform.code.clone(),
+                stable_id: Some("clear-me".into()),
+                title: "Unique clear fixture".into(),
+                url: "https://example.org/clear".into(),
+                published_time: None,
+                rank: 1,
+                heat: None,
+            }],
+            fetched_count: 1,
+            invalid_count: 0,
+        };
+        let stats = repository.commit_feed(&platform, run, &feed).unwrap();
+        let topic_id = stats.inserted_topic_ids[0];
+        repository
+            .record_recent_additions("manual", &[topic_id])
+            .unwrap();
+        connection
+            .execute("INSERT INTO creation_queue(topic_id) VALUES(?)", [topic_id])
+            .unwrap();
+        connection.execute("INSERT INTO topic_reading_link(topic_id,url) VALUES(?,'https://example.org/signed')", [topic_id]).unwrap();
+        for table in ["topic_observation_hourly", "topic_observation_daily"] {
+            connection.execute(&format!("INSERT INTO {table}(topic_id,bucket,rank,sample_count) VALUES(?,'fixture',1,1)"), [topic_id]).unwrap();
+        }
+        repository.hide_topic(topic_id).unwrap();
+        repository
+            .set_platform_enabled(&platform.code, false)
+            .unwrap();
+        connection.execute("INSERT INTO model_credential(id,algorithm,nonce,ciphertext) VALUES(1,'AES-256-GCM-file-v1',zeroblob(12),zeroblob(32))", []).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_clear BEFORE DELETE ON collection_run BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+        assert!(repository
+            .clear_data_transaction(ClearDataSelection {
+                collected_data: true,
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM topic", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM creation_queue", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let pointer: Option<i64> = connection
+            .query_row("SELECT last_success_run_id FROM platform", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pointer, Some(run));
+        connection
+            .execute_batch("DROP TRIGGER reject_clear")
+            .unwrap();
+        repository
+            .clear_data_transaction(ClearDataSelection {
+                collected_data: true,
+                ..Default::default()
+            })
+            .unwrap();
+        repository
+            .clear_data_transaction(ClearDataSelection {
+                collected_data: true,
+                ..Default::default()
+            })
+            .unwrap();
+        for table in [
+            "topic",
+            "topic_reading_link",
+            "creation_queue",
+            "recent_addition_topic",
+            "recent_addition_batch",
+            "topic_observation",
+            "topic_observation_hourly",
+            "topic_observation_daily",
+            "collection_run",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM topic_fts WHERE topic_fts MATCH 'Unique'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(!repository.source_configurations().unwrap()[0].enabled);
+        assert!(connection
+            .query_row("SELECT last_success_run_id FROM platform", [], |row| row
+                .get::<_, Option<
+                i64,
+            >>(
+                0
+            ))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM model_credential", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            connection
+                .query_row("SELECT COUNT(*) FROM app_setting", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap()
+                > 0
+        );
+        repository
+            .set_platform_enabled(&platform.code, true)
+            .unwrap();
+        let next = repository.create_run(platform.id, "manual").unwrap();
+        assert_eq!(
+            repository
+                .commit_feed(&platform, next, &feed)
+                .unwrap()
+                .inserted,
+            1
+        );
+    }
+
+    #[test]
+    fn regional_disable_is_isolated_persistent_and_idempotent() {
+        let connection = fixture();
+        connection.execute_batch("UPDATE platform SET region='domestic', built_in=1;
+          INSERT INTO platform(code,display_name,home_url,feed_url,region,enabled,built_in,deleted) VALUES
+          ('custom-cn','Custom CN','','','domestic',1,0,0),
+          ('foreign','Foreign','','','international',1,1,0),
+          ('already-off','Off','','','international',0,0,0),
+          ('deleted','Deleted','','','domestic',1,0,1);").unwrap();
+        let repository = TopicRepository::new(&connection);
+        for _ in 0..2 {
+            let saved = repository
+                .disable_source_region(SourceRegion::Domestic)
+                .unwrap();
+            assert!(saved
+                .iter()
+                .filter(|s| s.region == SourceRegion::Domestic)
+                .all(|s| !s.enabled));
+            assert!(saved.iter().find(|s| s.code == "foreign").unwrap().enabled);
+            assert!(
+                !saved
+                    .iter()
+                    .find(|s| s.code == "already-off")
+                    .unwrap()
+                    .enabled
+            );
+            assert!(!saved.iter().any(|s| s.code == "deleted"));
+        }
+        assert!(TopicRepository::new(&connection)
+            .source_configurations()
+            .unwrap()
+            .iter()
+            .filter(|s| s.region == SourceRegion::Domestic)
+            .all(|s| !s.enabled));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT enabled FROM platform WHERE code='deleted'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        repository
+            .disable_source_region(SourceRegion::International)
+            .unwrap();
+        assert!(repository.enabled_platforms().unwrap().is_empty());
+        assert!(serde_json::from_str::<SourceRegion>("\"all\"").is_err());
+    }
+
+    #[test]
+    fn regional_disable_rolls_back_every_switch_on_failure() {
+        let connection = fixture();
+        connection.execute_batch("UPDATE platform SET region='domestic';
+          INSERT INTO platform(code,display_name,home_url,feed_url,region) VALUES('second','Second','','','domestic');
+          CREATE TRIGGER reject_disable BEFORE UPDATE OF enabled ON platform WHEN NEW.code='second'
+          BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        let repository = TopicRepository::new(&connection);
+        assert!(repository
+            .disable_source_region(SourceRegion::Domestic)
+            .is_err());
+        assert!(repository
+            .source_configurations()
+            .unwrap()
+            .iter()
+            .all(|s| s.enabled));
+        connection
+            .execute_batch("DROP TRIGGER reject_disable")
+            .unwrap();
+        assert!(repository
+            .disable_source_region(SourceRegion::Domestic)
+            .is_ok());
+    }
+
+    #[test]
+    fn disabling_source_discards_in_flight_automatic_results() {
+        for trigger in ["startup", "timer"] {
+            let connection = fixture();
+            let repository = TopicRepository::new(&connection);
+            let platform = repository.enabled_platforms().unwrap().remove(0);
+            let run = repository.create_run(platform.id, trigger).unwrap();
+            repository
+                .set_platform_enabled(&platform.code, false)
+                .unwrap();
+            let feed = ParsedFeed {
+                topics: vec![CollectedTopic {
+                    platform_code: platform.code.clone(),
+                    stable_id: Some("late".into()),
+                    title: "Late response".into(),
+                    url: "https://example.org/late".into(),
+                    published_time: None,
+                    rank: 1,
+                    heat: None,
+                }],
+                fetched_count: 1,
+                invalid_count: 0,
+            };
+            let stats = repository.commit_feed(&platform, run, &feed).unwrap();
+            assert_eq!((stats.inserted, stats.updated), (0, 0));
+            assert!(stats.inserted_topic_ids.is_empty());
+            for table in ["topic", "topic_observation"] {
+                assert_eq!(
+                    connection
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            let status: String = connection
+                .query_row(
+                    "SELECT status FROM collection_run WHERE id=?",
+                    [run],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "skipped");
+            let pointer: Option<i64> = connection
+                .query_row(
+                    "SELECT last_success_run_id FROM platform WHERE id=?",
+                    [platform.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(pointer, None);
+            repository
+                .set_platform_enabled(&platform.code, true)
+                .unwrap();
+            let next = repository.create_run(platform.id, trigger).unwrap();
+            assert_eq!(
+                repository
+                    .commit_feed(&platform, next, &feed)
+                    .unwrap()
+                    .inserted,
+                1
+            );
+            assert!(!repository.platform_is_enabled(i64::MAX).unwrap());
+        }
     }
 
     #[test]

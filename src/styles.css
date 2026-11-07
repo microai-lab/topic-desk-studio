@@ -649,7 +649,21 @@ h1 {
 /* ─── Source list ────────────────────────────────────────────────── */
 .source-settings { display: grid; gap: 20px; }
 .source-settings-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.storage-clear-options { display: grid; gap: 6px; min-width: 0; margin: 18px 0 0; padding: 0; border: 0; }
+/* The dialog title already identifies the action; retain the scope legend for assistive technology. */
+.storage-clear-options legend { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.storage-clear-options .storage-clear-option { display: flex; align-items: flex-start; gap: 11px; padding: 11px 12px; border: 1px solid transparent; border-radius: 10px; line-height: 1.45; cursor: pointer; }
+.storage-clear-option:hover { background: var(--surface-2); }
+.storage-clear-option:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 25%, var(--border)); background: var(--accent-dim); }
+.storage-clear-option:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.storage-clear-options input { flex: none; width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.storage-clear-option-copy { display: grid; gap: 3px; min-width: 0; }
+.storage-clear-option-copy > span { font-size: 13px; font-weight: 550; color: var(--ink); }
+.storage-clear-option-copy > small { font-size: 11.5px; font-weight: 400; line-height: 1.5; color: var(--muted); }
 .source-batch-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.disabled-source-group { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+.disabled-source-group > summary { cursor: pointer; padding: 8px 0; font-weight: 600; color: var(--muted); }
+.disabled-source-group > p { margin: 0 0 12px; font-size: 12px; color: var(--muted); }
 .source-batch-actions button { display: inline-flex; align-items: center; gap: 5px; min-height: 36px; padding: 0 11px; border: 1px solid var(--border); border-radius: 9px; color: var(--ink); background: var(--surface); white-space: nowrap; cursor: pointer; font-size: 11.5px; }
 .source-batch-actions button:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--surface-2); }
 .source-batch-actions button svg { width: 14px; height: 14px; }
@@ -786,6 +800,8 @@ h1 {
 .storage-confirmation::backdrop { background: #11112555; backdrop-filter: blur(3px); }
 .storage-confirmation h2 { margin: 0 0 12px; font-size: 17px; }
 .storage-confirmation p { margin: 0; font-size: 13px; line-height: 1.8; }
+.storage-clear-dialog > p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.storage-clear-dialog .storage-confirmation-actions { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
 /* Every confirmation shares the same controls, independent of browser defaults or dialog type. */
 .storage-confirmation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .storage-confirmation-actions button { display: inline-flex; align-items: center; justify-content: center; min-width: 88px; min-height: 38px; padding: 8px 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; font-weight: 550; line-height: 20px; cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease; }
@@ -1223,5 +1239,53 @@ button.browser-download-copy:disabled { cursor: default; }
   .source-connection-button.is-testing svg, .source-batch-test.is-testing svg { animation: none; }
 }
 
-/* Explain automatic collection routing beside its setting. */
+/* Source management hierarchy: overview, primary actions, compact source cards. */
+.source-settings-header { align-items: center; }
+.source-settings .source-primary-actions { flex: none; }
+.source-management-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.source-regional-actions { justify-content: flex-start; align-items: center; }
+.source-toolbar-label { margin-right: 4px; color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.source-maintenance-menu { position: relative; flex: none; }
+.source-maintenance-menu > summary { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 10px; list-style: none; cursor: pointer; color: var(--muted); border-radius: 8px; font-size: 12px; }
+.source-maintenance-menu > summary::-webkit-details-marker { display: none; }
+.source-maintenance-menu > summary svg { width: 14px; height: 14px; }
+.source-maintenance-menu[open] > summary { background: var(--accent-dim); color: var(--accent); }
+.source-maintenance-actions { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; min-width: 190px; padding: 7px; flex-direction: column; align-items: stretch; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 12px 32px #0002; }
+.source-maintenance-actions button { justify-content: flex-start; border-color: transparent; }
+.source-maintenance-menu summary:focus-visible, .source-settings button:focus-visible, .disabled-source-group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.source-settings .source-list { overflow: visible; border: 0; background: transparent; gap: 10px; }
+.source-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 4px 0 14px; }
+.source-overview > div { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.source-overview dt { color: var(--muted); font-size: 12px; }
+.source-overview dd { margin: 0; color: var(--ink); font-size: 28px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
+.source-overview > .source-overview-active { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: linear-gradient(135deg, var(--accent-dim), var(--surface)); }
+.source-overview-active dd { color: var(--accent); }
+.source-group-heading { display: flex; align-items: center; gap: 8px; padding: 0 2px 4px; }
+.source-group-heading h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.source-group-heading > span { color: var(--muted); font-size: 11px; }
+.source-group-empty { padding: 24px; margin: 0; border: 1px dashed var(--border); border-radius: 12px; color: var(--muted); font-size: 13px; text-align: center; }
+.source-settings .source-list-item { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.source-settings .source-row { gap: 10px; padding: 15px 12px; border-radius: 12px; }
+.source-settings .source-row-name { flex-wrap: wrap; font-weight: 600; line-height: 1.5; }
+.source-settings .source-row-info { gap: 5px; }
+.source-avatar { position: relative; display: grid; place-items: center; flex: none; width: 36px; height: 36px; border: 1px solid color-mix(in srgb, var(--accent) 12%, var(--border)); border-radius: 11px; background: var(--accent-dim); color: var(--accent); font-size: 15px; font-weight: 650; }
+.source-avatar .health-dot { position: absolute; right: -2px; bottom: -2px; margin: 0; border: 2px solid var(--surface); width: 9px; height: 9px; box-sizing: content-box; }
+.source-row-tools { display: flex; align-items: center; gap: 1px; flex: none; padding-left: 8px; border-left: 1px solid var(--border); }
+.source-settings .switch { flex: none; margin-left: 5px; }
+.source-settings .disabled-source-group { border: 1px solid var(--border); border-radius: 13px; padding: 4px 12px 12px; margin-top: 12px; background: var(--surface-2); }
+.source-settings .disabled-source-group:not([open]) { padding-bottom: 4px; }
+.source-settings .disabled-source-group > summary { padding: 13px 2px; color: var(--ink); font-size: 12px; }
+.source-settings .disabled-source-group .source-list-item + .source-list-item { margin-top: 8px; }
+.source-settings .disabled-source-group .source-avatar { color: var(--muted); background: var(--surface-2); }
+@container source-settings (max-width: 640px) {
+  .source-management-toolbar { flex-wrap: wrap; }
+  .source-regional-actions { flex-wrap: wrap; }
+  .source-toolbar-label { width: 100%; margin-bottom: 2px; }
+  .source-overview { gap: 8px; }
+  .source-overview > div { padding: 15px 12px; }
+  .source-overview dd { font-size: 24px; }
+  .source-settings .source-row { flex-wrap: wrap; }
+  .source-settings .source-row-info { flex-basis: calc(100% - 90px); }
+  .source-row-tools { margin-left: auto; }
+}
 .source-network-help { color: var(--muted); font-size: 11.5px; line-height: 1.5; font-weight: 400; }

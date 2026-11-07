@@ -112,6 +112,17 @@ pub fn set_platform_enabled(
     })
 }
 
+/// Disable one typed region in a transaction and return the saved switch states.
+#[tauri::command]
+pub fn disable_source_region(
+    state: State<'_, AppState>,
+    region: crate::models::SourceRegion,
+) -> Result<Vec<SourceConfiguration>, String> {
+    with_repository(&state, |repository| {
+        repository.disable_source_region(region)
+    })
+}
+
 /// Return all editable built-in and custom source definitions.
 #[tauri::command]
 pub fn list_source_configurations(
@@ -562,6 +573,84 @@ pub fn restore_latest_backup(
     result
 }
 
+/// Exclude startup, timer and manual collection while destructive maintenance runs.
+/// A dropped permit releases the flag on success, errors and unwinding.
+fn without_collection<T>(
+    active: &AtomicBool,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    struct Permit<'a>(&'a AtomicBool);
+    impl Drop for Permit<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "采集进行中，请待采集完成后再清除数据".to_string())?;
+    let _permit = Permit(active);
+    operation()
+}
+
+/// Clear only explicitly selected categories after confirmation. Login clearing
+/// uses the native session lifecycle; live settings and downloaded files are retained.
+#[tauri::command]
+pub fn clear_local_data(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    browser: State<'_, crate::browser_profile::BrowserProfile>,
+    confirmed: bool,
+    selection: crate::models::ClearDataSelection,
+) -> Result<StorageOperationResult, String> {
+    if !confirmed {
+        return Err("请先确认清除本地数据".into());
+    }
+    selection.validate().map_err(|error| error.to_string())?;
+    without_collection(&state.refreshing, || {
+        let directory = state.database_path.parent().ok_or("应用数据目录无效")?;
+        crate::storage::clear_selected(
+            selection,
+            || {
+                let database = state
+                    .database
+                    .lock()
+                    .map_err(|_| AppError::PoisonedState.to_string())?;
+                let _browser = browser.inner.lock().map_err(|error| error.to_string())?;
+                TopicRepository::new(&database)
+                    .clear_local_data(&directory.join("browser.sqlite"), selection)
+                    .map_err(|error| error.to_string())?;
+                let _ = app.emit_to(
+                    tauri::EventTarget::webview("main"),
+                    "browser-library-changed",
+                    (),
+                );
+                Ok(())
+            },
+            || {
+                // Do not hold the browser mutex: clearing snapshots and native
+                // temporary contexts acquires that mutex internally.
+                crate::desktop_sessions::clear(&app)?;
+                let _ = app.emit_to(
+                    tauri::EventTarget::webview("main"),
+                    "browser-context-reset",
+                    (),
+                );
+                Ok(())
+            },
+            || {
+                // Backup creation uses these same locks; never delete a snapshot
+                // while another command is still writing its databases or key.
+                let _database = state
+                    .database
+                    .lock()
+                    .map_err(|_| AppError::PoisonedState.to_string())?;
+                let _browser = browser.inner.lock().map_err(|error| error.to_string())?;
+                crate::storage::clear_backups(directory).map_err(|error| error.to_string())
+            },
+        )
+    })
+}
+
 /// Run retention, index optimization and passive WAL checkpoints on demand.
 #[tauri::command]
 pub fn optimize_storage(
@@ -860,6 +949,29 @@ pub async fn browser_request(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clearing_excludes_collection_and_always_releases_its_permit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let active = AtomicBool::new(true);
+        assert!(
+            super::without_collection(&active, || -> Result<(), String> {
+                panic!("must not clear during collection")
+            })
+            .is_err()
+        );
+        assert!(active.load(Ordering::Acquire));
+        active.store(false, Ordering::Release);
+        assert!(
+            super::without_collection(&active, || -> Result<(), String> {
+                assert!(active.load(Ordering::Acquire));
+                Err("fixture rollback".into())
+            })
+            .is_err()
+        );
+        assert!(!active.load(Ordering::Acquire));
+        super::without_collection(&active, || Ok(())).unwrap();
+        assert!(!active.load(Ordering::Acquire));
+    }
     use super::validate_proxy_url;
     use super::{AtomicUsize, Ordering, SourceConnectionTestPermit};
 
