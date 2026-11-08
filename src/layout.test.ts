@@ -4,6 +4,19 @@ import { describe, expect, it } from 'vitest'
 import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, topicDragWidth, READER_PANE_MIN_WIDTH, sidebarNavigationPlan, SPLIT_WORKSPACE_MIN_WIDTH, TOPIC_PANE_MIN_WIDTH } from './layout'
 
 describe('reader sizing', () => {
+  it('keeps settings content bounded and centered while fullscreen changes the available width', () => {
+    const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
+    const page = css.match(/\.settings-page\s*\{([^}]+)\}/)?.[1] ?? ''
+    const panel = css.match(/\.settings-panel\s*\{([^}]+)\}/)?.[1] ?? ''
+    // Implicit auto tracks can exceed the centered page when cards/toolbars
+    // contribute intrinsic widths. The page must constrain its children too.
+    expect(page).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/)
+    expect(page).toMatch(/min-width:\s*0/)
+    expect(page).toMatch(/max-width:\s*840px/)
+    expect(page).toMatch(/margin:\s*0 auto/)
+    expect(panel).toMatch(/scrollbar-gutter:\s*stable both-edges/)
+    expect(panel).toMatch(/overflow-x:\s*hidden/)
+  })
   it('ignores stale capture, released buttons and invalid geometry after idle', () => {
     expect(topicDragWidth(7, 7, 1, 500, 100, 1000)).toBe(400)
     expect(topicDragWidth(7, 7, 1, -100, 100, 1000)).toBe(320)

@@ -28,13 +28,13 @@ mod xiaohongshu;
 
 use commands::{
     backup_storage, browser_request, clear_local_data, collect_xiaohongshu_session, delete_source,
-    disable_source_region, export_source_configurations, get_model_settings, get_network_settings,
-    get_storage_status, get_ui_preferences, hide_topic, import_source_configurations,
-    list_hidden_topics, list_source_configurations, list_topics, open_data_directory,
-    optimize_storage, refresh_topics, reorder_source_configurations, restore_all_hidden_topics,
-    restore_default_sources, restore_hidden_topic, restore_latest_backup, save_model_settings,
-    save_network_settings, save_source_configuration, save_ui_preferences, set_platform_enabled,
-    set_topic_queued, test_source_connection, translate_topic, AppState,
+    export_source_configurations, get_model_settings, get_network_settings, get_storage_status,
+    get_ui_preferences, hide_topic, import_source_configurations, list_hidden_topics,
+    list_source_configurations, list_topics, open_data_directory, optimize_storage, refresh_topics,
+    reorder_source_configurations, restore_all_hidden_topics, restore_default_sources,
+    restore_hidden_topic, restore_latest_backup, save_model_settings, save_network_settings,
+    save_source_configuration, save_ui_preferences, set_platform_enabled,
+    set_source_region_enabled, set_topic_queued, test_source_connection, translate_topic, AppState,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -133,7 +133,7 @@ pub fn run() {
             clear_local_data,
             open_data_directory,
             set_platform_enabled,
-            disable_source_region,
+            set_source_region_enabled,
             list_source_configurations,
             test_source_connection,
             reorder_source_configurations,

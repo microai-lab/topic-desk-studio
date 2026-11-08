@@ -1,0 +1,7 @@
+<!doctype html>
+<!-- Manual browser regression harness. Only the iframe viewport changes; no application data is accessed. -->
+<meta charset="utf-8"><title>Topic Desk layout regression</title>
+<style>body{margin:0;background:#e8e8ef;font:14px system-ui}header{padding:12px;display:flex;gap:10px}button{padding:8px 14px}iframe{display:block;border:0;background:white;max-width:none}</style>
+<header><button data-width="1180" data-height="680">Window 1180</button><button data-width="1920" data-height="1080">Wide 1920</button><button data-width="860" data-height="560">Compact 860</button></header>
+<iframe title="Application layout fixture" src="./layout-preview-app.html" width="1180" height="680"></iframe>
+<script>document.querySelector('header').addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;const frame=document.querySelector('iframe');frame.width=button.dataset.width;frame.height=button.dataset.height;});</script>

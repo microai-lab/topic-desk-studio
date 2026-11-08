@@ -112,14 +112,15 @@ pub fn set_platform_enabled(
     })
 }
 
-/// Disable one typed region in a transaction and return the saved switch states.
+/// Set one typed region in a transaction and return the saved switch states.
 #[tauri::command]
-pub fn disable_source_region(
+pub fn set_source_region_enabled(
     state: State<'_, AppState>,
     region: crate::models::SourceRegion,
+    enabled: bool,
 ) -> Result<Vec<SourceConfiguration>, String> {
     with_repository(&state, |repository| {
-        repository.disable_source_region(region)
+        repository.set_source_region_enabled(region, enabled)
     })
 }
 

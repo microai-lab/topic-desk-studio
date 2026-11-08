@@ -1,7 +1,7 @@
 /** Disabled settings rows must be recoverable without appearing as enabled discovery choices. */
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it } from 'vitest'
-import { SourceSettingsGroups } from './SourceSettingsGroups'
+import { SourceSettingsGroups, SourceSettingsOverview } from './SourceSettingsGroups'
 import { messages } from './i18n'
 import type { SourceConfiguration } from './types'
 
@@ -22,10 +22,17 @@ it('omits the disabled group when every source is enabled', () => {
   expect(html).not.toContain('<details')
 })
 
-it('shows an empty-state explanation and zero overview counts when every source is disabled', () => {
+it('shows an empty-state explanation when every source is disabled', () => {
   const html = renderToStaticMarkup(<SourceSettingsGroups sources={[{ ...source, enabled: false }]} busy={true} m={messages.zh} renderSource={item => <span key={item.code}>{item.code}</span>} />)
   expect(html).toContain(messages.zh.sourceNoEnabled)
-  expect(html.match(/<dd>0<\/dd>/g)).toHaveLength(3)
   expect(html).toContain('aria-busy="true"')
   expect(html).toContain('<details')
+})
+
+it('renders overview counts independently of the source list', () => {
+  const empty = renderToStaticMarkup(<SourceSettingsOverview sources={[{ ...source, enabled: false }]} m={messages.zh} />)
+  expect(empty.match(/<dd>0<\/dd>/g)).toHaveLength(3)
+  const active = renderToStaticMarkup(<SourceSettingsOverview sources={[source]} m={messages.zh} />)
+  expect(active.match(/<dd>1<\/dd>/g)).toHaveLength(2)
+  expect(active.match(/<dd>0<\/dd>/g)).toHaveLength(1)
 })

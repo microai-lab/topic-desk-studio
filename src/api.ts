@@ -36,9 +36,9 @@ export async function setPlatformEnabled(code: string, enabled: boolean): Promis
   await invoke('set_platform_enabled', { code, enabled })
 }
 
-/** Disable only the selected region through the transactional native boundary. */
-export async function disableSourceRegion(region: SourceRegion): Promise<SourceConfiguration[]> {
-  return invoke<SourceConfiguration[]>('disable_source_region', { region })
+/** Set only the selected region through the transactional native boundary. */
+export async function setSourceRegionEnabled(region: SourceRegion, enabled: boolean): Promise<SourceConfiguration[]> {
+  return invoke<SourceConfiguration[]>('set_source_region_enabled', { region, enabled })
 }
 
 /** Load source definitions for the native-only collection engine. */

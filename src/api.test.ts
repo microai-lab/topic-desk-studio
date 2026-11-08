@@ -1,7 +1,7 @@
 /** Browser lifecycle requests must remain ordered even when a native call fails. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
-import { browserControl, browserRequest, clearLocalData, disableSourceRegion, refreshTopics, testSourceConnection } from './api'
+import { browserControl, browserRequest, clearLocalData, setSourceRegionEnabled, refreshTopics, testSourceConnection } from './api'
 import { EMPTY_CLEAR_SELECTION } from './storagePresentation'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
@@ -25,13 +25,13 @@ it('sends explicit confirmation when clearing collected data and propagates fail
   await expect(clearLocalData(selection)).rejects.toThrow('collection active')
 })
 
-it('disables the requested region through one native transaction and exposes failures', async () => {
+it('sets the requested regional state through one native transaction and exposes failures', async () => {
   vi.mocked(invoke).mockResolvedValueOnce([])
-  await expect(disableSourceRegion('domestic')).resolves.toEqual([])
-  expect(invoke).toHaveBeenLastCalledWith('disable_source_region', { region: 'domestic' })
+  await expect(setSourceRegionEnabled('domestic', false)).resolves.toEqual([])
+  expect(invoke).toHaveBeenLastCalledWith('set_source_region_enabled', { region: 'domestic', enabled: false })
   vi.mocked(invoke).mockRejectedValueOnce(new Error('fixture rollback'))
-  await expect(disableSourceRegion('international')).rejects.toThrow('fixture rollback')
-  expect(invoke).toHaveBeenLastCalledWith('disable_source_region', { region: 'international' })
+  await expect(setSourceRegionEnabled('international', true)).rejects.toThrow('fixture rollback')
+  expect(invoke).toHaveBeenLastCalledWith('set_source_region_enabled', { region: 'international', enabled: true })
 })
 
 it('tests only a saved source by code through the native boundary', async () => {

@@ -450,16 +450,17 @@ impl<'connection> TopicRepository<'connection> {
         Ok(())
     }
 
-    /// Disable a region atomically; existing topics and the other region remain untouched.
-    pub fn disable_source_region(
+    /// Set a region atomically; existing topics, deleted sources, and the other region remain untouched.
+    pub fn set_source_region_enabled(
         &self,
         region: SourceRegion,
+        enabled: bool,
     ) -> AppResult<Vec<SourceConfiguration>> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
-            "UPDATE platform SET enabled = 0, update_time = datetime('now', 'localtime')
-             WHERE deleted = 0 AND region = ? AND enabled != 0",
-            [region_value(region)],
+            "UPDATE platform SET enabled = ?, update_time = datetime('now', 'localtime')
+             WHERE deleted = 0 AND region = ? AND enabled != ?",
+            params![enabled, region_value(region), enabled],
         )?;
         let sources = self.source_configurations()?;
         transaction.commit()?;
@@ -1822,7 +1823,7 @@ mod tests {
         let repository = TopicRepository::new(&connection);
         for _ in 0..2 {
             let saved = repository
-                .disable_source_region(SourceRegion::Domestic)
+                .set_source_region_enabled(SourceRegion::Domestic, false)
                 .unwrap();
             assert!(saved
                 .iter()
@@ -1855,10 +1856,70 @@ mod tests {
             1
         );
         repository
-            .disable_source_region(SourceRegion::International)
+            .set_source_region_enabled(SourceRegion::International, false)
             .unwrap();
         assert!(repository.enabled_platforms().unwrap().is_empty());
         assert!(serde_json::from_str::<SourceRegion>("\"all\"").is_err());
+    }
+
+    #[test]
+    fn regional_enable_is_isolated_persistent_and_rolls_back_on_failure() {
+        let connection = fixture();
+        connection
+            .execute_batch(
+                "UPDATE platform SET region='domestic', enabled=0;
+          INSERT INTO platform(code,display_name,home_url,feed_url,region,enabled,deleted) VALUES
+          ('second','Second','','','domestic',0,0),
+          ('foreign','Foreign','','','international',0,0),
+          ('deleted','Deleted','','','domestic',0,1);
+          CREATE TRIGGER reject_enable BEFORE UPDATE OF enabled ON platform WHEN NEW.code='second'
+          BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+            )
+            .unwrap();
+        let repository = TopicRepository::new(&connection);
+        assert!(repository
+            .set_source_region_enabled(SourceRegion::Domestic, true)
+            .is_err());
+        assert!(repository
+            .source_configurations()
+            .unwrap()
+            .iter()
+            .all(|s| !s.enabled));
+        connection
+            .execute_batch("DROP TRIGGER reject_enable")
+            .unwrap();
+        for _ in 0..2 {
+            let saved = repository
+                .set_source_region_enabled(SourceRegion::Domestic, true)
+                .unwrap();
+            assert!(saved
+                .iter()
+                .filter(|s| s.region == SourceRegion::Domestic)
+                .all(|s| s.enabled));
+            assert!(!saved.iter().find(|s| s.code == "foreign").unwrap().enabled);
+        }
+        assert!(TopicRepository::new(&connection)
+            .source_configurations()
+            .unwrap()
+            .iter()
+            .filter(|s| s.region == SourceRegion::Domestic)
+            .all(|s| s.enabled));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT enabled FROM platform WHERE code='deleted'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        connection
+            .execute_batch("DELETE FROM platform WHERE region='international'")
+            .unwrap();
+        assert!(repository
+            .set_source_region_enabled(SourceRegion::International, true)
+            .is_ok());
     }
 
     #[test]
@@ -1870,7 +1931,7 @@ mod tests {
           BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
         let repository = TopicRepository::new(&connection);
         assert!(repository
-            .disable_source_region(SourceRegion::Domestic)
+            .set_source_region_enabled(SourceRegion::Domestic, false)
             .is_err());
         assert!(repository
             .source_configurations()
@@ -1881,7 +1942,7 @@ mod tests {
             .execute_batch("DROP TRIGGER reject_disable")
             .unwrap();
         assert!(repository
-            .disable_source_region(SourceRegion::Domestic)
+            .set_source_region_enabled(SourceRegion::Domestic, false)
             .is_ok());
     }
 

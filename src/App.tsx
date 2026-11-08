@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { Archive, ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Database, Download, EyeOff, FolderOpen, GripVertical, HardDrive, LoaderCircle, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, Bot, Bookmark, ChevronDown, Database, Download, EyeOff, GripVertical, HardDrive, LoaderCircle, Network, PanelRight, Pencil, Plus, Radar, RefreshCw, RotateCcw, Search, SlidersHorizontal, Sparkles, Trash2, Upload, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
   backupStorage, browserRequest, collectXiaohongshuSession, deleteSource, exportSourceConfigurations, hideTopic,
@@ -14,9 +14,9 @@ import {
 import { ProxyAddressField } from './ProxyAddressField'
 import { DEFAULT_PROXY_URL } from './networkPresentation'
 import { createSourceSettingsReader, enabledSources, sourceDraftForSave } from './sourceSettingsState'
-import { SourceSettingsGroups } from './SourceSettingsGroups'
+import { SourceSettingsGroups, SourceSettingsOverview } from './SourceSettingsGroups'
 import { SourceSettingsToolbar } from './SourceSettingsToolbar'
-import { disableSourceRegion } from './api'
+import { setSourceRegionEnabled } from './api'
 import { clearLocalData } from './api'
 import type { ClearDataSelection } from './types'
 import { EMPTY_CLEAR_SELECTION, hasClearSelection } from './storagePresentation'
@@ -27,6 +27,7 @@ import { Sidebar } from './Sidebar'
 import type { SidebarView } from './Sidebar'
 import { clampTopicWidth, DEFAULT_TOPIC_WIDTH, topicColumns, sidebarNavigationPlan } from './layout'
 import { StorageConfirmation } from './StorageConfirmation'
+import { StorageActions } from './StorageActions'
 import { SourceConnectionBatchTestButton, SourceConnectionTestButton, SourceConnectionTestResultView } from './SourceConnectionTest'
 import { SourceConnectionSummaryDialog } from './SourceConnectionSummaryDialog'
 import { matchingSourceConnectionState, runSourceConnectionBatch, runSourceConnectionTest, sourceConnectionKey, sourceHealthTone } from './sourceConnectionPresentation'
@@ -758,14 +759,14 @@ export function App() {
   }
 
   /** Publish switches only after the regional transaction succeeds; failures retain the saved list. */
-  const disableRegion = async (region: SourceRegion): Promise<void> => {
+  const setRegionEnabled = async (region: SourceRegion, enabled: boolean): Promise<void> => {
     if (sourceBulkInFlight.current || sourceTogglesInFlight.current.size > 0 || savingSource || reorderingSources) return
     sourceBulkInFlight.current = true
     setDisablingRegion(region)
     sourceSettingsReader.current.invalidate()
     setError(undefined)
     try {
-      setSourceConfigs(await disableSourceRegion(region))
+      setSourceConfigs(await setSourceRegionEnabled(region, enabled))
       await load(true)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -1280,10 +1281,10 @@ export function App() {
 
             {settingsTab === 'sources' && (
               <div className="settings-page source-settings" aria-live="polite">
-                <SourceSettingsToolbar m={m} regional={<>
+                <SourceSettingsToolbar m={m} overview={<SourceSettingsOverview sources={sourceConfigs} m={m} />} regional={<>
                     <SourceRegionActions sources={sourceConfigs} locale={locale}
                       busy={disablingRegion !== undefined || savingSource || reorderingSources || togglingSources.length > 0}
-                      onDisable={(region) => void disableRegion(region)} />
+                      onSetEnabled={(region, enabled) => void setRegionEnabled(region, enabled)} />
                     </>} primary={<>
                     <SourceConnectionBatchTestButton locale={locale} running={sourceTestBatch?.running === true}
                       disabled={Object.values(sourceConnectionTests).some((state) => state.phase === 'testing' || state.phase === 'queued') || sourceConfigs.length === 0}
@@ -1293,6 +1294,7 @@ export function App() {
                     </>} maintenance={<>
                     <button type="button" disabled={disablingRegion !== undefined} onClick={() => void importSources()}><Download aria-hidden="true" />{m.sourceImportAll}</button>
                     <button type="button" onClick={() => void exportSources()}><Upload aria-hidden="true" />{m.sourceExportAll}</button>
+                    </>} restore={<>
                     <button type="button" disabled={disablingRegion !== undefined} onClick={() => setPendingStorageAction('restoreSources')}><RotateCcw aria-hidden="true" />{m.sourceRestoreDefaults}</button>
                     </>} />
 
@@ -1364,14 +1366,10 @@ export function App() {
                       </dl>
                     </>
                   ) : null}
-                  <div className="settings-card-actions storage-actions">
-                    <button type="button" disabled={storageAction !== null} onClick={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><FolderOpen aria-hidden="true" />{m.storageOpenFolder}</button>
-                    <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('optimize')}><Wrench aria-hidden="true" />{storageAction === 'optimize' ? m.storageWorking : m.storageOptimize}</button>
-                    <button type="button" disabled={storageAction !== null} onClick={() => setPendingStorageAction('backup')}><Archive aria-hidden="true" />{storageAction === 'backup' ? m.storageWorking : m.storageBackup}</button>
-                    <button className="storage-restore" type="button" disabled={storageAction !== null || refreshing} onClick={() => setPendingStorageAction('clear')}><Trash2 aria-hidden="true" />{storageAction === 'clear' ? m.storageWorking : m.storageClear}</button>
-                    <button className="storage-restore" type="button" disabled={storageAction !== null || storageStatus?.latestBackup == null} onClick={() => setPendingStorageAction('restore')}><RotateCcw aria-hidden="true" />{storageAction === 'restore' ? m.storageWorking : m.storageRestore}</button>
-                  </div>
-                  {storageStatus !== undefined ? <code className="storage-path">{storageStatus.dataDirectory}</code> : null}
+                  <StorageActions development={import.meta.env.DEV} currentAction={storageAction} collecting={refreshing}
+                    canRestore={storageStatus?.latestBackup != null} directory={storageStatus?.dataDirectory} m={m}
+                    onOpenDirectory={() => void openDataDirectory().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}
+                    onRequest={setPendingStorageAction} />
                   <section className="hidden-topics-panel">
                     <header>
                       <div>

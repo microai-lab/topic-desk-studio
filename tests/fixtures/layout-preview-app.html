@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- Development-only layout fixture: render the real App with a read-only, deterministic fake Tauri bridge. -->
+<html><head><meta charset="utf-8"><title>Topic Desk fixture</title></head><body><div id="root"></div>
+<script>
+const sources=Array.from({length:12},(_,i)=>({code:'fixture-'+i,displayName:i===0?'A source with a deliberately long display name':'示例数据源 '+i,homeUrl:'https://example.org/',endpointUrl:'https://example.org/feed',region:i%2?'domestic':'international',category:'general',parserType:'rss',proxyMode:'direct',enabled:i<8,builtIn:true,parserConfig:{}}));
+let callback=0;
+window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},transformCallback:()=>++callback,unregisterCallback:()=>{},invoke:async(command,args)=>{
+if(command==='plugin:event|listen')return ++callback;
+if(command==='plugin:event|unlisten'||command==='browser_request')return null;
+if(command==='get_ui_preferences'||command==='save_ui_preferences')return {locale:'zh',theme:'light'};
+if(command==='list_source_configurations')return sources;
+if(command==='get_model_settings')return {endpoint:'https://example.org/v1',model:'fixture-model',hasApiKey:false};
+if(command==='get_network_settings')return {proxyUrl:null};
+if(command==='get_storage_status')return {dataDirectory:'/fixture',topicDatabaseBytes:1000,browserDatabaseBytes:1000,topicCount:1,observationCount:1,collectionRunCount:1,browserRecordCount:0,integrityOk:true,latestBackup:null};
+if(command==='list_hidden_topics')return [];
+if(command==='list_topics')return {topics:[{id:1,platformCode:'fixture-0',platformName:sources[0].displayName,category:'general',title:'Fullscreen layout fixture with a very long title '.repeat(6),url:'https://example.org/article',publishedTime:null,globalRank:1,rank:1,heat:null,firstSeenAt:'2026-11-08 09:00:00',updatedAt:'2026-11-08 09:00:00',rankDelta:null,consecutiveRuns:1,trend:[],queued:false,queuedAt:null}],total:1,queuedTotal:0,recentTotal:1,statuses:[],historyEnabled:true};
+throw new Error('Read-only layout fixture: '+command);
+}};
+window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
+</script><script type="module" src="/src/main.tsx"></script></body></html>

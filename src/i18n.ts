@@ -142,8 +142,6 @@ export interface Messages {
   xhsLoginCollect: string
   xhsCollectPage: string
   sourceAdd: string
-  sourceBulkActions: string
-  sourceMoreActions: string
   sourceEnabledGroup: string
   sourceNoEnabled: string
   sourceToggleLabel: (name: string) => string
@@ -151,6 +149,10 @@ export interface Messages {
   sourceDisabledGroupHelp: string
   sourceDisableDomestic: string
   sourceDisableInternational: string
+  sourceEnableDomesticHint: string
+  sourceEnableInternationalHint: string
+  sourceDisableDomesticHint: string
+  sourceDisableInternationalHint: string
   sourceEdit: string
   sourceCustom: string
   sourceBuiltIn: string
@@ -331,15 +333,17 @@ const zh: Messages = {
   xhsLoginCollect: '登录采集',
   xhsCollectPage: '采集当前页',
   sourceAdd: '添加数据源',
-  sourceBulkActions: '批量管理',
-  sourceMoreActions: '更多操作',
   sourceEnabledGroup: '已启用来源',
   sourceNoEnabled: '暂无启用来源。展开下方已关闭的来源，或添加一个新来源。',
   sourceToggleLabel: (name) => `启用 ${name}`,
   sourceDisabledGroup: '已关闭的数据源',
   sourceDisabledGroupHelp: '展开后可重新启用；已启用来源会自动展示在上方。',
-  sourceDisableDomestic: '一键关闭国内数据源',
-  sourceDisableInternational: '一键关闭国外数据源',
+  sourceDisableDomestic: '国内数据源',
+  sourceDisableInternational: '国际数据源',
+  sourceEnableDomesticHint: '打开所有国内数据源',
+  sourceEnableInternationalHint: '打开所有国际数据源',
+  sourceDisableDomesticHint: '关闭所有国内数据源',
+  sourceDisableInternationalHint: '关闭所有国际数据源',
   sourceEdit: '编辑数据源',
   sourceCustom: '自定义',
   sourceBuiltIn: '默认',
@@ -519,15 +523,17 @@ const en: Messages = {
   xhsLoginCollect: 'Login & collect',
   xhsCollectPage: 'Collect page',
   sourceAdd: 'Add source',
-  sourceBulkActions: 'Bulk actions',
-  sourceMoreActions: 'More actions',
   sourceEnabledGroup: 'Enabled sources',
   sourceNoEnabled: 'No enabled sources. Expand disabled sources below or add a new source.',
   sourceToggleLabel: (name) => `Enable ${name}`,
   sourceDisabledGroup: 'Disabled sources',
   sourceDisabledGroupHelp: 'Expand to enable a source again. Enabled sources automatically appear above.',
-  sourceDisableDomestic: 'Disable domestic sources',
-  sourceDisableInternational: 'Disable international sources',
+  sourceDisableDomestic: 'Domestic sources',
+  sourceDisableInternational: 'International sources',
+  sourceEnableDomesticHint: 'Enable all domestic sources',
+  sourceEnableInternationalHint: 'Enable all international sources',
+  sourceDisableDomesticHint: 'Disable all domestic sources',
+  sourceDisableInternationalHint: 'Disable all international sources',
   sourceEdit: 'Edit source',
   sourceCustom: 'Custom',
   sourceBuiltIn: 'Default',
