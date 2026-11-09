@@ -49,12 +49,6 @@ export function nextZoom(current: number, direction: number, levels: readonly nu
     : [...levels].reverse().find((level) => level < current)
 }
 
-/** Keep device-preview dimensions inside the native browser's supported range. */
-export function clampDeviceDimension(value: number, minimum: number): number {
-  if (!Number.isFinite(value)) return minimum
-  return Math.max(minimum, Math.min(2560, value))
-}
-
 /** The same button restores an active translation or starts the saved target language. */
 export function pageTranslationRequest(settings: BrowserSettings, translated = false): BrowserAction {
   return translated ? { kind: 'restorePageTranslation' } : { kind: 'translatePage', targetLanguage: settings.translationLanguage }
@@ -97,4 +91,17 @@ export async function runBrowserCookieClear(clear: () => Promise<unknown>, reset
   await clear()
   reset()
   await reopen()
+}
+
+/** Keep popovers open while crossing the trigger gap; cancel delayed dismissal on reentry/unmount. */
+export function createPopoverDismissal(close: () => void, delay = 180) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const dispose = () => { clearTimeout(timer); timer = undefined }
+  return {
+    dispose,
+    update(inside: boolean) {
+      if (inside) dispose()
+      else if (timer === undefined) timer = setTimeout(() => { timer = undefined; close() }, delay)
+    },
+  }
 }

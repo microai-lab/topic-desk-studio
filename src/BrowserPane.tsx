@@ -1,17 +1,19 @@
 /** Browser chrome modeled on the reference: omnibox, native content and local tools. */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { popupBrowserMenu, updateBrowserPopupZoom, closeBrowserPopup, keepBrowserPopup, leaveBrowserPopup } from './nativeBrowserMenu'
+import type { BrowserPopupItem } from './nativeBrowserMenu'
 import { listen } from '@tauri-apps/api/event'
-import { ArrowDownToLine, ArrowLeft, ArrowRight, Camera, ChevronDown, ChevronUp, Cookie, EllipsisVertical, ExternalLink, File, FolderOpen, Globe2, History, Languages, LoaderCircle, Minus, MonitorSmartphone, Plus, Printer, RefreshCw, RotateCw, Search, Settings2, Trash2, X, ZoomIn } from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, ArrowRight, Cookie, EllipsisVertical, FolderOpen, Globe2, History, Languages, LoaderCircle, Plus, RefreshCw, Search, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { browserControl, browserRequest } from './api'
 import type { TopicRailItem, BrowserLibrary, BrowserSettings, BrowserStatus, BrowserTranslationProgress } from './api'
-import { clampDeviceDimension, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+import { isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
 import type { Locale } from './i18n'
 import { clampTopicWidth, topicDragWidth, TOPIC_PANE_MIN_WIDTH } from './layout'
 import { ReaderExpandButton } from './ReaderExpandButton'
 import { TabMediaButton } from './TabMediaButton'
 
-type Panel = 'menu' | 'history' | 'downloads' | 'downloadsAll' | 'import' | 'clear' | 'settings' | null
+type Panel = 'history' | 'downloadsAll' | 'import' | 'clear' | 'settings' | null
 type TabContextMenu = { tabId: string; x: number; y: number } | null
 export interface BrowserTab {
   id: string
@@ -75,23 +77,18 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
   const suppressTabClick = useRef(false)
   const [statuses, setStatuses] = useState<Record<string, BrowserStatus>>({})
   const [address, setAddress] = useState('')
+  const popupZoom = useRef(1)
+  const popupZoomQueue = useRef(Promise.resolve())
+  const [popoverOpen, setPopoverOpen] = useState(false)
   const [panel, setPanel] = useState<Panel>(null)
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenu>(null)
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null)
-  const [preview, setPreview] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [library, setLibrary] = useState<BrowserLibrary>({ history: [], downloads: [], settings: DEFAULT_SETTINGS, downloadCancellation: false })
   const [busy, setBusy] = useState(false)
   const [slowLoading, setSlowLoading] = useState(false)
-  const [findOpen, setFindOpen] = useState(false)
-  const [findText, setFindText] = useState('')
-  const [findResult, setFindResult] = useState<boolean | null>(null)
-  const [sensitive, setSensitive] = useState(false)
-  const [device, setDevice] = useState(false)
-  const [deviceWidth, setDeviceWidth] = useState(390)
-  const [deviceHeight, setDeviceHeight] = useState(844)
   const [filter, setFilter] = useState('')
   const [translating, setTranslating] = useState(false)
   const [translatedTabs, setTranslatedTabs] = useState<Record<string, boolean>>({})
@@ -104,7 +101,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
   const status = statuses[activeTabId] ?? { tabId: activeTabId, url: activeTab?.url ?? '', title: activeTab?.title ?? '', loading: false, canBack: false, canForward: false, muted: false, mediaPlaying: false }
   const pageProgress = translationProgress[activeTabId]
   const pendingTranslation = (pageProgress?.queued ?? 0) + (pageProgress?.active ?? 0)
-  overlayActive.current = panel !== null || tabContextMenu !== null || closing === true
+  overlayActive.current = popoverOpen || panel !== null || tabContextMenu !== null || closing === true
   activeTabRef.current = activeTabId
   const fail = useCallback((reason: unknown) => { if (alive.current) setError(String(reason)) }, [])
   const refreshLibrary = useCallback(async () => {
@@ -115,6 +112,22 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
     const rect = viewport.current?.getBoundingClientRect()
     return rect && rect.width > 0 && rect.height > 0 ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height, viewportHeight: window.innerHeight } : undefined
   }
+  useEffect(() => {
+    const close = () => { void closeBrowserPopup().catch(fail) }
+    window.addEventListener('resize', close)
+    return () => { window.removeEventListener('resize', close); close() }
+  }, [activeTabId, fail])
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') return
+      if (event.target instanceof Element && event.target.closest('[data-browser-popover]')) keepBrowserPopup()
+      else leaveBrowserPopup()
+    }
+    const down = (event: PointerEvent) => { if (!(event.target instanceof Element && event.target.closest('[data-browser-popover]'))) void closeBrowserPopup().catch(fail) }
+    document.addEventListener('pointermove', move)
+    document.addEventListener('pointerdown', down)
+    return () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerdown', down) }
+  }, [fail])
   const openAddress = useCallback(async (input: string) => {
     const area = bounds()
     if (!area || !input.trim() || !activeTabId || closingTabs.current.has(activeTabId)) return
@@ -223,7 +236,7 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
       window.removeEventListener('resize', sync)
       window.removeEventListener('scroll', sync, true)
     }
-  }, [activeTabId, device, deviceHeight, deviceWidth, fail, panel, tabContextMenu, closing])
+  }, [activeTabId, fail, panel, tabContextMenu, closing])
 
   useEffect(() => {
     if (!activeTab || closingTabs.current.has(activeTab.id)) return
@@ -263,26 +276,16 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
   }, [activeTabId, activeTab?.topicId, status.loading, status.url, topicRailVisible, railTopics, locale, theme, fail])
 
   const showPanel = async (next: Panel) => {
+    await closeBrowserPopup()
     setError(null); setNotice(null); setFilter('')
-    const overlay = await browserControl<{ preview: string | null }>({ kind: 'overlay', visible: next !== null, capture: panel === null && next !== null && status.url !== '' })
-    if (panel === null) setPreview(overlay.preview)
+    await browserControl({ kind: 'overlay', visible: next !== null })
     setPanel(next)
-    if (next && next !== 'menu') await refreshLibrary()
+    if (next) await refreshLibrary()
     if (next !== 'import') setImportText('')
-  }
-  const find = async (backwards = false) => {
-    if (!findText) return
-    const found = await browserControl<boolean>({ kind: 'find', text: findText, backwards, sensitive })
-    setFindResult(found)
   }
   const setZoom = async (factor: number) => {
     await browserControl({ kind: 'zoom', factor })
     setLibrary((old) => ({ ...old, settings: { ...old.settings, zoom: factor } }))
-  }
-  const stepZoom = (direction: number) => {
-    const current = library.settings.zoom
-    const factor = nextZoom(current, direction, ZOOMS)
-    if (factor !== undefined) void setZoom(factor).catch(fail)
   }
   const perform = async (operation: () => Promise<unknown>, message?: string) => {
     setBusy(true); setError(null); setNotice(null)
@@ -347,14 +350,14 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
   const openTabContextMenu = (tabId: string, x: number, y: number) => {
     tabContextVisible.current = true
     setTabContextMenu({ tabId, x, y })
-    void browserControl({ kind: 'overlay', visible: true, capture: false }).catch(fail)
+    void browserControl({ kind: 'overlay', visible: true }).catch(fail)
   }
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); addressInput.current?.focus(); addressInput.current?.select() }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); setFindOpen(true) }
-      if (event.key === 'Escape') { dismissTabContextMenu(); if (panel) void showPanel(null).catch(fail); else setFindOpen(false) }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); void browserControl({ kind: 'findPanel', visible: true, locale }).catch(fail) }
+      if (event.key === 'Escape') { dismissTabContextMenu(); if (panel) void showPanel(null).catch(fail); else void browserControl({ kind: 'findPanel', visible: false, locale }).catch(fail) }
     }
     window.addEventListener('keydown', keydown)
     return () => window.removeEventListener('keydown', keydown)
@@ -421,15 +424,62 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
     return last?.dataset.browserTabId ? { id: last.dataset.browserTabId, after: true } : null
   }
 
-  const menuItem = (Glyph: LucideIcon, cn: string, en: string, operation: () => void, disabled = false, hint?: string) => <button className="browser-menu-item" type="button" disabled={disabled} onClick={operation}><span className="browser-menu-label"><Glyph aria-hidden="true" /><span>{t(cn, en)}</span></span>{hint ? <small>{hint}</small> : null}</button>
   const panelTitle = panel === 'history' ? t('历史记录', 'History') : panel === 'downloadsAll' ? t('完整下载记录', 'All downloads') : panel === 'import' ? t('导入 Cookie', 'Import cookies') : panel === 'clear' ? t('清除浏览数据', 'Clear browsing data') : t('浏览器设置', 'Browser settings')
-  const recentDownloads = library.downloads.slice(0, 8)
   const activeDownloads = library.downloads.filter((row) => parseDownloadDetail(row.detail).state === 'downloading')
-  const finishedDownloads = recentDownloads.filter((row) => parseDownloadDetail(row.detail).state !== 'downloading')
   const hasPage = status.url !== ''
   const isXiaohongshu = isXiaohongshuAddress(status.url)
 
-  return <aside className={`browser-pane browser-chrome${device ? ' device-mode' : ''}${closing ? ' browser-pane-closing' : ''}`} aria-label={t('内置浏览器', 'Browser')}>
+  /** Local popup surfaces sit above native article views without changing their visibility or bounds. */
+  const openBrowserPopup = async (kind: 'menu' | 'downloads', anchor: { x: number; y: number }) => {
+    const items: BrowserPopupItem[] = []
+    const item = (text: string, action: () => void, enabled = true) => ({ text, action, enabled })
+    const separator = () => ({ item: 'Separator' as const })
+    if (kind === 'downloads') {
+      const latest = await browserControl<BrowserLibrary>({ kind: 'library' })
+      setLibrary(latest)
+      for (const row of latest.downloads.slice(0, 8)) {
+        const detail = parseDownloadDetail(row.detail)
+        const label = (row.title || row.url).slice(0, 100)
+        const actions = detail.state === 'complete'
+          ? [item(t('打开文件', 'Open file'), () => void browserControl({ kind: 'openDownload', id: row.id }).catch(fail)), item(t('打开所在文件夹', 'Open containing folder'), () => void revealDownload(row.id).catch(fail))]
+          : detail.state === 'downloading' && latest.downloadCancellation
+            ? [item(t('取消下载', 'Cancel download'), () => void browserControl({ kind: 'cancelDownload', id: row.id }).catch(fail))] : []
+        const state = detail.state === 'downloading' ? t('正在下载', 'Downloading') : detail.state === 'failed' ? t('失败', 'Failed') : detail.state === 'cancelled' ? t('已取消', 'Cancelled') : t('已完成', 'Complete')
+        if (actions.length) items.push({ text: `${label} · ${state}`, items: actions })
+        else items.push(item(`${label} · ${state}`, () => {}, false))
+      }
+      if (!latest.downloads.length) items.push(item(t('暂无下载记录', 'No downloads yet'), () => {}, false))
+      items.push(separator(), item(t('完整的下载记录', 'All downloads'), () => void showPanel('downloadsAll').catch(fail)))
+    } else {
+      items.push(item(t('在页面中查找', 'Find in page'), () => void browserControl({ kind: 'findPanel', visible: true, locale }).catch(fail), hasPage))
+      if (translatedTabs[activeTabId]) items.push(item(t('显示页面原文', 'Show original page'), () => void restorePageTranslation(), !busy))
+      items.push(item(t('打印', 'Print'), () => void nativeAction('print'), hasPage), separator())
+      popupZoom.current = library.settings.zoom
+      const zoom = (direction: number) => {
+        popupZoomQueue.current = popupZoomQueue.current.then(async () => {
+          const factor = direction === 0 ? 1 : nextZoom(popupZoom.current, direction, ZOOMS)
+          if (factor === undefined) return
+          await setZoom(factor)
+          popupZoom.current = factor
+          await updateBrowserPopupZoom(factor)
+        }).catch(fail)
+      }
+      items.push({ text: t('缩放', 'Zoom'), layout: 'zoom', enabled: hasPage, items: [
+        { ...item(t('缩小', 'Zoom out'), () => zoom(-1), hasPage && library.settings.zoom > .25), keepOpen: true },
+        { ...item(`${Math.round(library.settings.zoom * 100)}%`, () => zoom(0), hasPage), keepOpen: true },
+        { ...item(t('放大', 'Zoom in'), () => zoom(1), hasPage && library.settings.zoom < 3), keepOpen: true },
+      ] })
+      items.push(item(t('截取屏幕截图', 'Capture screenshot'), () => void nativeAction('screenshot'), hasPage && !busy), separator())
+      items.push(item(t('导入 Cookie…', 'Import cookies…'), () => void showPanel('import').catch(fail)))
+      items.push(item(t('下载', 'Downloads'), () => void openBrowserPopup('downloads', anchor).catch(fail)))
+      items.push(item(t('历史记录', 'History'), () => void showPanel('history').catch(fail)))
+      items.push(item(t('清除浏览数据', 'Clear browsing data'), () => void showPanel('clear').catch(fail)), separator())
+      items.push(item(t('用默认浏览器打开', 'Open in default browser'), () => void browserControl({ kind: 'openExternal' }).catch(fail), hasPage))
+      items.push(item(t('浏览器设置', 'Browser settings'), () => void showPanel('settings').catch(fail)))
+    }
+    await popupBrowserMenu(items, anchor, kind === 'menu' ? t('更多', 'More') : t('下载', 'Downloads'), setPopoverOpen)
+  }
+  return <aside className={`browser-pane browser-chrome${closing ? ' browser-pane-closing' : ''}`} aria-label={t('内置浏览器', 'Browser')}>
     <div className="reader-divider" role="separator" aria-label={t('调整选题宽度', 'Resize topics')} aria-orientation="vertical" aria-valuemin={TOPIC_PANE_MIN_WIDTH} aria-valuemax={Math.round(topicMaxWidth)} aria-valuenow={Math.round(topicWidth)} aria-valuetext={t(`选题 ${Math.round(topicWidth)} 像素`, `Topics ${Math.round(topicWidth)} pixels`)} tabIndex={0}
       onKeyDown={(event) => {
         const workspace = event.currentTarget.parentElement?.parentElement
@@ -535,50 +585,22 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
       <form className="browser-address" onSubmit={(event) => { event.preventDefault(); void openAddress(address).catch(fail) }}><Search className="browser-address-icon" aria-hidden="true" /><input ref={addressInput} aria-label={t('搜索或输入网址', 'Search or enter URL')} placeholder={t('搜索或输入网址', 'Search or enter URL')} value={address} spellCheck={false} autoComplete="off" onChange={(event) => setAddress(event.target.value)} onFocus={(event) => event.target.select()} /></form>
       {isXiaohongshu ? <button className="browser-collect-button" disabled={busy || status.loading} onClick={() => void perform(async () => setNotice(await onCollectXiaohongshu(activeTabId)))}>{busy ? t('采集中…', 'Collecting…') : t('采集当前页', 'Collect page')}</button> : null}
       <button className={`browser-icon-button${translatedTabs[activeTabId] ? ' active' : ''}${pendingTranslation > 0 ? ' is-loading' : ''}`} disabled={busy || !hasPage} aria-busy={pendingTranslation > 0} title={translatedTabs[activeTabId] ? t('显示页面原文', 'Show original page') : pageProgress ? t(`已译 ${pageProgress.completed} · 处理中 ${pageProgress.active} · 排队 ${pageProgress.queued} · 滚动后翻译 ${pageProgress.deferred} · 失败 ${pageProgress.failed}`, `Translated ${pageProgress.completed} · active ${pageProgress.active} · queued ${pageProgress.queued} · deferred ${pageProgress.deferred} · failed ${pageProgress.failed}`) : t('按设置的目标语言翻译页面', 'Translate page to the configured language')} aria-pressed={translatedTabs[activeTabId] === true} aria-label={translatedTabs[activeTabId] ? t('显示页面原文', 'Show original page') : t('翻译页面', 'Translate page')} onClick={() => void translatePage().catch(fail)}>{translating && !pageProgress ? <LoaderCircle className="translation-spinner" aria-hidden="true" /> : <Icon name="translate" />}{pendingTranslation > 0 ? <span className="browser-translation-count" aria-hidden="true">{pendingTranslation > 99 ? '99+' : pendingTranslation}</span> : null}</button>
-      <button className={`browser-icon-button browser-download-trigger${panel === 'downloads' ? ' active' : ''}${activeDownloads.length > 0 ? ' downloading' : ''}`} aria-expanded={panel === 'downloads'} aria-label={activeDownloads.length > 0 ? t(`正在下载 ${activeDownloads.length} 项`, `${activeDownloads.length} download${activeDownloads.length === 1 ? '' : 's'} in progress`) : t('下载', 'Downloads')} title={activeDownloads.length > 0 ? t(`正在下载 ${activeDownloads.length} 项`, `${activeDownloads.length} download${activeDownloads.length === 1 ? '' : 's'} in progress`) : t('下载', 'Downloads')} onClick={() => void showPanel(panel === 'downloads' ? null : 'downloads').catch(fail)}><Icon name="downloads" /></button>
-      <button className={`browser-icon-button${panel === 'menu' ? ' active' : ''}`} aria-expanded={panel === 'menu'} title={t('更多', 'More')} onClick={() => void showPanel(panel === 'menu' ? null : 'menu').catch(fail)}><Icon name="more" /></button>
+      <button className={`browser-icon-button browser-download-trigger${activeDownloads.length > 0 ? ' downloading' : ''}`} data-browser-popover="downloads" onPointerEnter={keepBrowserPopup} onPointerLeave={leaveBrowserPopup} aria-label={activeDownloads.length > 0 ? t(`正在下载 ${activeDownloads.length} 项`, `${activeDownloads.length} download${activeDownloads.length === 1 ? '' : 's'} in progress`) : t('下载', 'Downloads')} title={activeDownloads.length > 0 ? t(`正在下载 ${activeDownloads.length} 项`, `${activeDownloads.length} download${activeDownloads.length === 1 ? '' : 's'} in progress`) : t('下载', 'Downloads')} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); void openBrowserPopup('downloads', { x: rect.left, y: rect.bottom }).catch(fail) }}><Icon name="downloads" /></button>
+      <button className={`browser-icon-button`} data-browser-popover="menu" onPointerEnter={keepBrowserPopup} onPointerLeave={leaveBrowserPopup} title={t('更多', 'More')} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); void openBrowserPopup('menu', { x: rect.left, y: rect.bottom }).catch(fail) }}><Icon name="more" /></button>
     </header>
     {status.loading ? <div className="browser-loading-line" /> : null}
     {slowLoading ? <div className="browser-slow-notice" role="status"><span>{t('目标网站响应较慢，请检查网络后重试。', 'The website is responding slowly. Check your network and try again.')}</span><button type="button" onClick={() => void browserRequest('reload', activeTabId).catch(fail)}>{t('重试', 'Retry')}</button></div> : null}
-    {findOpen ? <form className="browser-find" onSubmit={(event) => { event.preventDefault(); void find(false).catch(fail) }}><Icon name="search" /><input autoFocus placeholder={t('在页面中查找', 'Find in page')} aria-label={t('在页面中查找', 'Find in page')} value={findText} onChange={(e) => { setFindText(e.target.value); setFindResult(null) }} /><button type="button" className={sensitive ? 'active' : ''} title={t('区分大小写', 'Match case')} onClick={() => setSensitive(!sensitive)}>Aa</button><span>{findResult === false ? t('未找到', 'No match') : ''}</span><button type="button" aria-label={t('上一项', 'Previous match')} title={t('上一项', 'Previous match')} onClick={() => void find(true).catch(fail)}><ChevronUp aria-hidden="true" /></button><button aria-label={t('下一项', 'Next match')} title={t('下一项', 'Next match')}><ChevronDown aria-hidden="true" /></button><button type="button" aria-label={t('关闭查找', 'Close find')} title={t('关闭查找', 'Close find')} onClick={() => setFindOpen(false)}><X aria-hidden="true" /></button></form> : null}
-    {device ? <div className="browser-device"><select aria-label={t('设备尺寸', 'Device size')} onChange={(event) => { const [width, height] = event.target.value.split('x').map(Number); if (width && height) { setDeviceWidth(width); setDeviceHeight(height) } }} defaultValue="390x844"><option value="390x844">{t('手机', 'Phone')} · 390 × 844</option><option value="768x1024">{t('平板', 'Tablet')} · 768 × 1024</option><option value="1280x800">{t('桌面', 'Desktop')} · 1280 × 800</option></select><input type="number" aria-label={t('视口宽度', 'Viewport width')} min={240} max={2560} value={deviceWidth} onChange={(e) => setDeviceWidth(clampDeviceDimension(Number(e.target.value), 240))} /><span>×</span><input type="number" aria-label={t('视口高度', 'Viewport height')} min={200} max={2560} value={deviceHeight} onChange={(e) => setDeviceHeight(clampDeviceDimension(Number(e.target.value), 200))} /><button aria-label={t('旋转', 'Rotate')} title={t('旋转', 'Rotate')} onClick={() => { setDeviceWidth(deviceHeight); setDeviceHeight(deviceWidth) }}><RotateCw aria-hidden="true" /></button><small>{t('视口预览', 'Viewport preview')}</small></div> : null}
     {error || notice ? <div className="toast-stack" aria-live="polite">
       {error ? <div key={error} className="error-banner app-toast" role="alert"><span>{error}</span><button aria-label={t('关闭', 'Close')} onClick={() => setError(null)}><X aria-hidden="true" /></button></div> : null}
       {notice ? <div key={notice} className="notice app-toast" role="status"><span>{notice}</span><button aria-label={t('关闭', 'Close')} onClick={() => setNotice(null)}><X aria-hidden="true" /></button></div> : null}
     </div> : null}
     <div className="browser-stage">
-      <div className="reader-viewport" ref={viewport} style={device ? { width: deviceWidth, maxWidth: '100%', height: deviceHeight, maxHeight: '100%', flex: 'none' } : undefined} />
+
+      <div className="reader-viewport" ref={viewport} />
       {hasPage && status.loading ? <div className="browser-page-loading" aria-label={t('正在打开网页', 'Opening webpage')}><span /><p>{t('正在打开网页…', 'Opening webpage…')}</p></div> : null}
-      {panel && preview ? <img className="browser-preview" src={preview} alt="" aria-hidden="true" /> : null}
       {!hasPage ? <div className="browser-start"><Icon name="globe" /><h2>{t('开始浏览', 'Start browsing')}</h2><p>{t('输入 URL 或搜索，探索更多内容', 'Enter a URL or search to explore')}</p></div> : null}
-      {panel ? <div className={`browser-overlay${panel === 'menu' ? ' menu-overlay' : ''}${panel === 'downloads' ? ' downloads-overlay' : ''}`} onPointerDown={(e) => { if (e.target === e.currentTarget) void showPanel(null).catch(fail) }}>
-        {panel === 'downloads' ? <section className="browser-download-popover" aria-label={t('下载', 'Downloads')}>
-          <header><h2>{t('下载', 'Downloads')}</h2><button className="browser-icon-button" aria-label={t('关闭', 'Close')} title={t('关闭', 'Close')} onClick={() => void showPanel(null).catch(fail)}><X aria-hidden="true" /></button></header>
-          {activeDownloads.length > 0 ? <div className="browser-download-section"><h3>{t('近期的下载记录', 'Recent downloads')}</h3>{activeDownloads.map((row) => <div className="browser-download-item downloading" key={row.id}>
-            <span className="browser-download-file"><File aria-hidden="true" /></span><div className="browser-download-copy"><strong title={row.title || row.url}>{row.title || row.url}</strong><small>{t('正在下载…', 'Downloading…')}</small><span className="browser-download-progress" aria-hidden="true"><i /></span></div>{library.downloadCancellation ? <button className="browser-download-action danger" aria-label={t('取消下载', 'Cancel download')} title={t('取消下载', 'Cancel download')} onClick={() => void browserControl({ kind: 'cancelDownload', id: row.id }).catch(fail)}><X aria-hidden="true" /></button> : null}
-          </div>)}</div> : null}
-          {finishedDownloads.length > 0 ? <div className="browser-download-section"><h3>{activeDownloads.length > 0 ? t('已完成', 'Completed') : t('最近下载', 'Recent downloads')}</h3>{finishedDownloads.map((row) => {
-            const detail = parseDownloadDetail(row.detail)
-            const complete = detail.state === 'complete'
-            return <div className={`browser-download-item ${complete ? 'complete' : 'failed'}`} key={row.id}>
-              <span className="browser-download-file"><File aria-hidden="true" /></span><button className="browser-download-copy" disabled={!complete} title={complete ? t('打开文件', 'Open file') : undefined} onClick={() => void browserControl({ kind: 'openDownload', id: row.id }).catch(fail)}><strong title={row.title || row.url}>{row.title || row.url}</strong><small>{complete ? t('已完成', 'Complete') : detail.state === 'cancelled' ? t('已取消', 'Cancelled') : t('下载失败', 'Download failed')} · {new Date(row.time).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US')}</small></button>{complete ? <button className="browser-download-action folder" aria-label={t('打开文件所在文件夹', 'Open containing folder')} title={t('打开文件所在文件夹', 'Open containing folder')} onClick={() => void revealDownload(row.id).catch(fail)}><FolderOpen aria-hidden="true" /></button> : null}
-            </div>
-          })}</div> : null}
-          {recentDownloads.length === 0 ? <p className="browser-download-empty">{t('暂无下载记录', 'No downloads yet')}</p> : null}
-          <footer><button type="button" onClick={() => void showPanel('downloadsAll').catch(fail)}>{t('完整的下载记录', 'All downloads')}<ExternalLink aria-hidden="true" /></button></footer>
-        </section> : panel === 'menu' ? <div className="browser-menu" role="menu">
-          {menuItem(Search, '在页面中查找', 'Find in page', () => { void showPanel(null).then(() => setFindOpen(true)).catch(fail) }, !hasPage, '⌘F')}
-          {translatedTabs[activeTabId] ? menuItem(Languages, '显示页面原文', 'Show original page', () => void restorePageTranslation(), busy) : null}
-          {menuItem(Printer, '打印', 'Print', () => void nativeAction('print'), !hasPage)}<hr />
-          <div className="browser-zoom-row"><span className="browser-menu-label"><ZoomIn aria-hidden="true" /><span>{t('缩放', 'Zoom')}</span></span><div className="browser-zoom-controls"><button aria-label={t('缩小', 'Zoom out')} disabled={!hasPage || library.settings.zoom <= .25} onClick={() => stepZoom(-1)}><Minus aria-hidden="true" /></button><button disabled={!hasPage} title={t('重置缩放', 'Reset zoom')} onClick={() => void setZoom(1).catch(fail)}>{Math.round(library.settings.zoom * 100)}%</button><button aria-label={t('放大', 'Zoom in')} disabled={!hasPage || library.settings.zoom >= 3} onClick={() => stepZoom(1)}><Plus aria-hidden="true" /></button></div><button className="browser-icon-button" disabled={!hasPage} title={t('重置缩放', 'Reset zoom')} onClick={() => void setZoom(1).catch(fail)}><Icon name="reload" /></button></div><hr />
-          {menuItem(MonitorSmartphone, device ? '隐藏设备工具栏' : '显示设备工具栏', device ? 'Hide device toolbar' : 'Show device toolbar', () => { void showPanel(null).then(() => setDevice(!device)).catch(fail) })}
-          {menuItem(Camera, '截取屏幕截图', 'Capture screenshot', () => void nativeAction('screenshot'), !hasPage || busy)}<hr />
-          {menuItem(Cookie, '导入 Cookie…', 'Import cookies…', () => void showPanel('import').catch(fail))}
-          {menuItem(ArrowDownToLine, '下载', 'Downloads', () => void showPanel('downloads').catch(fail))}
-          {menuItem(History, '历史记录', 'History', () => void showPanel('history').catch(fail))}
-          {menuItem(Trash2, '清除浏览数据', 'Clear browsing data', () => void showPanel('clear').catch(fail))}<hr />
-          {menuItem(Settings2, '浏览器设置', 'Browser settings', () => void showPanel('settings').catch(fail))}
-        </div> : <section className="browser-management" aria-label={panelTitle}>
+      {panel ? <div className="browser-overlay" onPointerDown={(e) => { if (e.target === e.currentTarget) void showPanel(null).catch(fail) }}>
+        <section className={`browser-management${panel === 'settings' ? ' browser-preferences-panel' : ''}`} aria-label={panelTitle}>
           <header><h2>{panelTitle}</h2><button className="browser-icon-button" title={t('返回网页', 'Return to page')} onClick={() => void showPanel(null).catch(fail)}><Icon name="close" /></button></header>
           {['history', 'downloadsAll'].includes(panel) ? <>
             <input className="browser-library-filter" aria-label={t('搜索记录', 'Search records')} placeholder={t('搜索记录…', 'Search records…')} value={filter} onChange={(e) => setFilter(e.target.value)} />
@@ -594,8 +616,8 @@ export function BrowserPane({ tabs, activeTabId, locale, expanded, topicRailVisi
         }, () => status.url ? openAddress(status.url) : Promise.resolve())
       } else await browserControl({ kind: 'clear', ...clear })
       await refreshLibrary() }, t('所选浏览数据已清除', 'Selected browsing data cleared'))}>{t('确认清除所选数据', 'Confirm and clear selected data')}</button></> : null}
-          {panel === 'settings' ? <><label className="browser-setting"><span>{t('搜索引擎', 'Search engine')}</span><select value={library.settings.searchEngine} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, searchEngine: e.target.value as BrowserSettings['searchEngine'] } })}><option value="bing">Bing</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option></select></label><label className="browser-setting"><span>{t('页面翻译目标语言', 'Page translation language')}</span><select value={library.settings.translationLanguage} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, translationLanguage: e.target.value as BrowserSettings['translationLanguage'] } })}><option value="auto">{t('自动（中文 ↔ English）', 'Auto (Chinese ↔ English)')}</option><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="es">Español</option><option value="ru">Русский</option></select></label><label className="browser-setting"><span>{t('默认缩放', 'Default zoom')}</span><select value={library.settings.zoom} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, zoom: Number(e.target.value) } })}>{ZOOMS.map((zoom) => <option key={zoom} value={zoom}>{Math.round(zoom * 100)}%</option>)}</select></label><label className="browser-check"><input type="checkbox" checked={library.settings.rememberHistory} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, rememberHistory: e.target.checked } })} />{t('保存浏览历史', 'Save browsing history')}</label><button className="browser-panel-primary" disabled={busy} onClick={() => void perform(() => browserControl({ kind: 'settings', settings: library.settings }), t('设置已保存', 'Settings saved'))}>{t('保存设置', 'Save settings')}</button></> : null}
-        </section>}
+          {panel === 'settings' ? <><div className="browser-preferences"><label className="browser-setting"><span>{t('搜索引擎', 'Search engine')}</span><select value={library.settings.searchEngine} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, searchEngine: e.target.value as BrowserSettings['searchEngine'] } })}><option value="bing">Bing</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option></select></label><label className="browser-setting"><span>{t('页面翻译目标语言', 'Page translation language')}</span><select value={library.settings.translationLanguage} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, translationLanguage: e.target.value as BrowserSettings['translationLanguage'] } })}><option value="auto">{t('自动（中文 ↔ English）', 'Auto (Chinese ↔ English)')}</option><option value="zh-CN">简体中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="es">Español</option><option value="ru">Русский</option></select></label><label className="browser-setting"><span>{t('默认缩放', 'Default zoom')}</span><select value={library.settings.zoom} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, zoom: Number(e.target.value) } })}>{ZOOMS.map((zoom) => <option key={zoom} value={zoom}>{Math.round(zoom * 100)}%</option>)}</select></label><label className="browser-history-setting"><span>{t('保存浏览历史', 'Save browsing history')}</span><input role="switch" type="checkbox" checked={library.settings.rememberHistory} onChange={(e) => setLibrary({ ...library, settings: { ...library.settings, rememberHistory: e.target.checked } })} /></label></div><footer className="browser-preferences-footer"><button className="browser-panel-primary" disabled={busy} onClick={() => void perform(() => browserControl({ kind: 'settings', settings: library.settings }), t('设置已保存', 'Settings saved'))}>{t('保存设置', 'Save settings')}</button></footer></> : null}
+        </section>
       </div> : null}
     </div>
   </aside>

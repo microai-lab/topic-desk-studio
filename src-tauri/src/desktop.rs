@@ -924,6 +924,12 @@ pub fn browser_request(
                 // embeds can otherwise open their own persistent database.
                 .initialization_script_for_all_frames(ARTICLE_INITIALIZATION_SCRIPT)
                 .initialization_script_for_all_frames(include_str!("page_media.js"))
+                // Install a document-lifetime find shortcut before page code can
+                // consume it; the floating UI remains absent until requested.
+                .initialization_script(format!(
+                    "({})(false, navigator.language.startsWith('zh') ? 'zh' : 'en')",
+                    include_str!("find_panel.js")
+                ))
                 .on_navigation(move |url| {
                     // Some engines report target=_blank custom schemes as navigation
                     // before requesting a popup. Cancel both paths after routing.

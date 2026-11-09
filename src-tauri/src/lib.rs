@@ -1,6 +1,7 @@
 //! Topic Desk Studio native application composition and lifecycle setup.
 
 mod browser_control;
+mod browser_popover;
 mod browser_profile;
 mod browser_sessions;
 mod catalog;
@@ -48,6 +49,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            app.manage(browser_popover::PopoverState::default());
             let data_dir = data_directory::prepare(app.handle())?;
             desktop_sessions::install(app.handle(), &data_dir)?;
             app.manage(browser_profile::open(data_dir.join("browser.sqlite"))?);
@@ -114,6 +116,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            browser_popover::browser_popover_open,
+            browser_popover::browser_popover_data,
+            browser_popover::browser_popover_ready,
+            browser_popover::browser_popover_update,
+            browser_popover::browser_popover_event,
             list_topics,
             refresh_topics,
             collect_xiaohongshu_session,

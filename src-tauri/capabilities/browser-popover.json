@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-popover",
+  "description": "Local browser popup can listen for display updates; article views receive no permissions.",
+  "webviews": ["browser-popover"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

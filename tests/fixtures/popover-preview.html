@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Read-only custom popup preview. Native ready/event commands are fixtures and never touch user data. -->
+<html><head><meta charset="utf-8"><title>Browser popup fixture</title><style>body{width:240px!important;min-height:0!important}#root{width:240px}</style></head><body><div id="root"></div>
+<script>
+let callback=0;
+const item=(id,text,children=[])=>({id,text,children,enabled:true,separator:false});
+const data={token:'fixture',title:'更多',theme:'light',x:0,y:0,width:240,height:600,items:[item('find','在页面中查找'),item('print','打印'),{id:'',text:'',children:[],enabled:false,separator:true},{...item('zoom','缩放',[item('minus','缩小'),item('reset','100%'),item('plus','放大')]),layout:'zoom'},item('shot','截取屏幕截图'),{id:'',text:'',children:[],enabled:false,separator:true},item('import','导入 Cookie…'),item('downloads','下载'),item('history','历史记录'),item('clear','清除浏览数据'),{id:'',text:'',children:[],enabled:false,separator:true},item('external','用默认浏览器打开'),item('settings','浏览器设置')]};
+window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'browser-popover'}},transformCallback:()=>++callback,unregisterCallback:()=>{},invoke:async(command)=>{
+if(command==='plugin:event|listen')return ++callback;
+if(command==='plugin:event|unlisten'||command==='browser_popover_ready'||command==='browser_popover_event')return null;
+if(command==='browser_popover_data')return data;
+throw new Error('Read-only popup fixture: '+command);
+}};
+window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener:()=>{}};
+</script><script type="module" src="/src/main.tsx"></script></body></html>

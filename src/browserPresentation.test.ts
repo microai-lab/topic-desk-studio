@@ -1,7 +1,7 @@
 /** Regression tests for browser chrome state, trusted domains and bounded controls. */
 
 import { describe, expect, it, vi } from 'vitest'
-import { browserTabClosePlan, clampDeviceDimension, detachBrowserTopicIds, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
+import { browserTabClosePlan, detachBrowserTopicIds, isXiaohongshuAddress, nextZoom, observeReaderRecovery, pageTranslationRequest, parseDownloadDetail, runBrowserCookieClear, runBrowserNavigation, runBrowserTabClose } from './browserPresentation'
 
 it('detaches cleared topic IDs while preserving open pages and leaving original tabs untouched', () => {
   const tabs = [{ id: 'a', topicId: 1, url: 'https://example.org/old', title: 'Old' }, { id: 'b', url: 'https://example.org/other', title: 'Other' }]
@@ -95,12 +95,6 @@ describe('bounded browser controls', () => {
     expect(nextZoom(0.25, -1, levels)).toBeUndefined()
   })
 
-  it('clamps preview dimensions and handles invalid numbers', () => {
-    expect(clampDeviceDimension(120, 240)).toBe(240)
-    expect(clampDeviceDimension(390, 240)).toBe(390)
-    expect(clampDeviceDimension(9_000, 200)).toBe(2560)
-    expect(clampDeviceDimension(Number.NaN, 200)).toBe(200)
-  })
 })
 
 describe('pageTranslationRequest', () => {
@@ -197,4 +191,27 @@ describe('workspace after closing browser tabs', () => {
     await runBrowserTabClose(['last'], async () => { throw new Error('native failure') }, closed, vi.fn())
     expect(closed).not.toHaveBeenCalled()
   })
+})
+
+it('dismisses outside the hover region, permits gap crossing, and cancels on disposal', async () => {
+  const { createPopoverDismissal } = await import('./browserPresentation')
+  vi.useFakeTimers()
+  try {
+    const close = vi.fn()
+    const hover = createPopoverDismissal(close)
+    hover.update(false)
+    vi.advanceTimersByTime(100)
+    hover.update(true)
+    vi.advanceTimersByTime(200)
+    expect(close).not.toHaveBeenCalled()
+    hover.update(false)
+    vi.advanceTimersByTime(100)
+    hover.update(false)
+    vi.advanceTimersByTime(80)
+    expect(close).toHaveBeenCalledOnce()
+    hover.update(false)
+    hover.dispose()
+    vi.runAllTimers()
+    expect(close).toHaveBeenCalledOnce()
+  } finally { vi.useRealTimers() }
 })

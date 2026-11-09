@@ -19,6 +19,11 @@ pub enum BrowserAction {
     Navigate {
         input: String,
     },
+    /// A page-local, unprivileged find widget floats above native content without resizing it.
+    FindPanel {
+        visible: bool,
+        locale: String,
+    },
     Find {
         text: String,
         backwards: bool,
@@ -29,8 +34,6 @@ pub enum BrowserAction {
     },
     Overlay {
         visible: bool,
-        #[serde(default)]
-        capture: bool,
     },
     TopicRail {
         #[serde(rename = "tabId")]
@@ -41,6 +44,8 @@ pub enum BrowserAction {
         theme: String,
         visible: bool,
     },
+    /// Open the live native view URL, never an address supplied by page content.
+    OpenExternal,
     Print,
     Screenshot,
     Settings {
@@ -373,6 +378,23 @@ pub async fn browser_control(
             view()?.navigate(url.clone()).map_err(|e| e.to_string())?;
             Ok(json!({"url":url.as_str()}))
         }
+        BrowserAction::FindPanel { visible, locale } => {
+            let article = view()?;
+            // DOM input focus alone cannot establish the OS input-method caret
+            // after closing a different WebView's popup. Focus the native view first.
+            if visible {
+                article.set_focus().map_err(|error| error.to_string())?;
+            }
+            eval(
+                &article,
+                format!(
+                    "({})({},{})",
+                    include_str!("find_panel.js"),
+                    json!(visible),
+                    json!(locale)
+                ),
+            )
+        }
         BrowserAction::Find {
             text,
             backwards,
@@ -407,26 +429,24 @@ pub async fn browser_control(
                 .map_err(|e| e.to_string())?;
             Ok(json!(factor))
         }
-        BrowserAction::Overlay { visible, capture } => {
-            let mut preview = None;
+        BrowserAction::OpenExternal => {
+            let url = view()?.url().map_err(|e| e.to_string())?;
+            validate_external_url(&url)?;
+            app.opener()
+                .open_url(url.as_str(), None::<&str>)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        BrowserAction::Overlay { visible } => {
             if let Ok(view) = view() {
                 if visible {
-                    if capture {
-                        use base64::Engine;
-                        preview = crate::desktop::capture_screenshot(&view).ok().map(|bytes| {
-                            format!(
-                                "data:image/png;base64,{}",
-                                base64::engine::general_purpose::STANDARD.encode(bytes)
-                            )
-                        });
-                    }
                     view.hide().map_err(|e| e.to_string())?;
                     webview.set_focus().map_err(|e| e.to_string())?;
                 } else {
                     view.show().map_err(|e| e.to_string())?;
                 }
             }
-            Ok(json!({"preview":preview}))
+            Ok(Value::Null)
         }
         BrowserAction::TopicRail {
             tab_id,
@@ -1281,5 +1301,34 @@ mod tests {
         assert!(download_path(&profile, 2).is_err());
         assert!(download_path(&profile, 3).is_err());
         assert!(download_path(&profile, 999).is_err());
+    }
+}
+
+/// External browser launches allow only ordinary web navigation.
+fn validate_external_url(url: &url::Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("只能使用默认浏览器打开 HTTP(S) 页面".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    #[test]
+    fn permits_web_pages_and_rejects_privileged_schemes() {
+        for value in [
+            "https://example.org/current?q=1#section",
+            "http://localhost:8080/",
+        ] {
+            assert!(super::validate_external_url(&url::Url::parse(value).unwrap()).is_ok());
+        }
+        for value in [
+            "file:///tmp/page",
+            "javascript:alert(1)",
+            "about:blank",
+            "data:text/html,test",
+        ] {
+            assert!(super::validate_external_url(&url::Url::parse(value).unwrap()).is_err());
+        }
     }
 }
